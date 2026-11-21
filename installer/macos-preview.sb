@@ -1,0 +1,11 @@
+(version 1)
+(allow default)
+(deny network*)
+(deny file-write*
+    (require-all
+        (require-not (subpath (param "PREVIEW_ROOT")))
+        (require-not (literal "/dev/null"))))
+; Keep Unity's preferences inside the preview home.
+(deny mach-lookup
+    (global-name "com.apple.cfprefsd.agent")
+    (global-name "com.apple.cfprefsd.daemon"))

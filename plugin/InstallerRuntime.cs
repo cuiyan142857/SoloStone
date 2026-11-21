@@ -54,7 +54,7 @@ internal static class InstallerRuntime
             install=>FirewallRegistry.Verify(install,FirewallProtection.Executables(install)),RuntimeCosmeticVersion);
 
     // A compile-time reference would inline the value from our reference DLLs, so this reads the running client's.
-    private static string RuntimeCosmeticVersion() {
+    internal static string RuntimeCosmeticVersion() {
         var field=Type.GetType("Network, Assembly-CSharp")?.GetField("CosmeticVersion",BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static);
         if(field==null) return null;
         return (field.IsLiteral?field.GetRawConstantValue():field.GetValue(null)) as string;

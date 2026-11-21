@@ -28,7 +28,13 @@ internal static class NativeReportUI
     {
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var built = ReportRedaction.FromEnvironment(Environment.UserName, Environment.MachineName, localAppData, Environment.GetEnvironmentVariable);
-#if SOLOSTONE_INSTALLER
+#if SOLOSTONE_MACOS
+        if (launch != null)
+        {
+            built.AddPath(launch.InstalledRoot, "<solostone>");
+            built.AddPath(Path.GetDirectoryName(launch.RootProfilePath), "<saves>");
+        }
+#elif SOLOSTONE_INSTALLER
         // The install root, the saves folder and the player's own Hearthstone folder can sit outside the profile (any drive, any folder name).
         try
         {

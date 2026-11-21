@@ -95,10 +95,14 @@ public sealed class OfflineProbe : BaseUnityPlugin
 #if !STANDARD_PROOF
         SaveHold.Engage();
 #endif
+        string[] args = Environment.GetCommandLineArgs();
+#if SOLOSTONE_MACOS
+        OfflineLaunchContext launch = MacPreviewRuntime.Admit(args);
+        string identity = "macos", localData = "";
+#else
         string identity = WindowsIdentity.GetCurrent().Name;
         string executable = Process.GetCurrentProcess().MainModule.FileName;
         string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string[] args = Environment.GetCommandLineArgs();
         bool wine = RunningUnderWine();
         int lane = OfflineGuard.LaunchLane(args);
         bool installed = false, installerBuild = false;
@@ -143,6 +147,7 @@ public sealed class OfflineProbe : BaseUnityPlugin
         OfflineLaunchContext launch = OfflineGuard.ResolveHeldLaunch(identity, Environment.MachineName,
             executable, localData, args, candidate, wine);
 #endif
+#endif
         launchContext = launch;
         StartupTiming.Mark("isolation-guard");
         Root = launch.Root;
@@ -158,21 +163,21 @@ public sealed class OfflineProbe : BaseUnityPlugin
             return;
         }
 #endif
-        NativePlaytest.Root = Reports + @"\";
+        NativePlaytest.Root = Reports + Path.DirectorySeparatorChar;
         ConfigureLoanerGroupPath(Root);
         StartupTiming.Mark("card-catalogs");
 #if !SOLOSTONE_INSTALLER || SOLOSTONE_TEST_HOOKS
         PlaytestQueue.KnobPath = Reports + @"\playtest-opponent";
 #endif
-        DebugScenario.Path = Reports + @"\debug-scenario";
+        DebugScenario.Path = Path.Combine(Reports, "debug-scenario");
         DebugScenario.RunId = launch.RunId;
         DebugScenario.ClearStale(DebugScenario.Path);   // a scenario file never survives into a new launch
         // Test lanes 1-3 only: lane 0 (the owner's client, test control is live after every deploy) and the Deck never arm the knob.
-        PetPacingKnob.ClearStale(Reports + @"\pet-xp-pacing");
+        PetPacingKnob.ClearStale(Path.Combine(Reports, "pet-xp-pacing"));
         // Any -hs-native-ui-host selector (deck) disables it too, whether or not the launch validated as a Deck launch.
         PetPacingKnob.Path = PetPacingKnob.PathFor(launch.LaneId, launch.Deck || Array.IndexOf(args, "-hs-native-ui-host") >= 0, Reports);
         PetPacingKnob.RunId = launch.RunId;
-        PlaytestRecord.RecordDirectory = Reports + @"\playtest";
+        PlaytestRecord.RecordDirectory = Path.Combine(Reports, "playtest");
 #if !SOLOSTONE_RELEASE
         CardDbExport.Root = Reports + @"\control";
         CosmeticCoinExport.Root = Reports;
@@ -212,6 +217,7 @@ public sealed class OfflineProbe : BaseUnityPlugin
         Application.wantsToQuit += () => { TraceExit(); try { ClientBridge.ConfirmStartupOnQuit(); } catch (Exception) { } return true; };
         StartupTiming.Mark("login-guard-patches");
         Network.SetShouldBeConnectedToAurora(false);
+#if !SOLOSTONE_MACOS
         foreach (string address in new[] { "1.1.1.1", "192.168.1.1" })
         {
             using (var socket = new TcpClient())
@@ -229,6 +235,7 @@ public sealed class OfflineProbe : BaseUnityPlugin
                 }
             }
         }
+#endif
         Logger.LogInfo("NETWORK_CANARIES_BLOCKED; login token fetching disabled");
         StartupTiming.Mark("network-canaries");
         // Register before native parsing so the account-only checkbox reloads as a local bool.
@@ -246,7 +253,7 @@ public sealed class OfflineProbe : BaseUnityPlugin
 #endif
         StartupTiming.Mark("settings-seed-config");
         GoldenPilot.ConfigureLethalHost(launch.Deck);
-        Logger.LogInfo("NPC_LETHAL_MODE host=" + (launch.Deck ? "deck" : "windows")
+        Logger.LogInfo("NPC_LETHAL_MODE host=" + (launch.Deck ? "deck" : identity == "macos" ? "macos" : "windows")
             + " workers=" + (GoldenPilot.ParallelLethalEnabled ? 2 : 1));
         // Lanes 1-3 are windowed test clients: keep them out of the owner's way and out of the shared display options.
         if (launch.LaneId != 0) LaneWindow.Install(harmony, Logger);
@@ -342,7 +349,9 @@ public sealed class OfflineProbe : BaseUnityPlugin
 #endif
             ClientBridge.OpenSaves();
             StartupTiming.Milestone("save-hold-released");
-#if SOLOSTONE_INSTALLER
+#if SOLOSTONE_MACOS
+            MacPreviewRuntime.Confirm(launch);
+#elif SOLOSTONE_INSTALLER
             // The launcher's health check: this release runs on this client, checks included. It waits for this file.
             string marker = launch.RunId + "\n" + WindowsIdentity.GetCurrent().Name + "\n" + DateTime.UtcNow.ToString("o");
             InstallerRuntime.Prepare(() => File.WriteAllText(Path.Combine(Reports, "plugin-loaded.txt"), marker));

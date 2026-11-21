@@ -30,7 +30,11 @@ public sealed class OfflineLaunchContext
 #else
     public string Root => InstalledRoot ?? OfflineGuard.LaneRoot(LaneId);
 #endif
+#if SOLOSTONE_MACOS
+    public string Reports => Path.Combine(Root, "reports");
+#else
     public string Reports => Root + @"\reports";
+#endif
 #if !SOLOSTONE_RELEASE
     public string ClientPath => Root + @"\client\Hearthstone.exe";
     public int ControlPort => 18765 + LaneId;
@@ -302,7 +306,7 @@ public static class OfflineGuard
             null, relaunchPrevious, relaunchToken, installedRoot, null, selector);
     }
 
-    private static string Selector(string[] args, string name, bool required)
+    internal static string Selector(string[] args, string name, bool required)
     {
         string value = null;
         if (args == null) throw new InvalidOperationException("Missing launch arguments");
