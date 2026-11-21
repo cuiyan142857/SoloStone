@@ -16,9 +16,10 @@ python3 installer/macos_preview.py launch
 
 - **Check** exercises the macOS Seatbelt policy with IPv4 and IPv6 TCP and UDP connections and a write outside the
   preview directory.
-- **Prepare** reads your Hearthstone bundle and its separate game data when present. It copies them into
-  `~/Library/Application Support/SoloStone macOS Preview`, downloads the hash-pinned macOS BepInEx package and Unity
-  Mono libraries, and builds the SoloStone plugin against the copied client. The client and its assemblies stay on your Mac.
+- **Prepare** reads your Hearthstone bundle and any separate game data and language files. It copies them into
+  `~/Library/Application Support/SoloStone macOS Preview`, downloads the hash-pinned BepInEx 5.4.23.6 package (including
+  Doorstop 4.6.0) and Unity Mono libraries, and builds the SoloStone plugin against the copied client. The client and its
+  assemblies stay on your Mac.
 - **Launch** verifies the staged files and starts the copy inside the same Seatbelt policy. The plugin checks the
   network policy again inside the game and runs its normal client checks before opening a save. Keep the terminal
   open while playing. Start the preview with this command each time, since opening the copied app in Finder starts

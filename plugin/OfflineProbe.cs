@@ -266,7 +266,9 @@ public sealed class OfflineProbe : BaseUnityPlugin
         StartupTiming.Mark("hub-theme");
         DeckExperience.Initialize(harmony, Logger, Config, launch);
         StartupTiming.Mark("deck-experience");
+#if !SOLOSTONE_MACOS
         NativePowerSource.Initialize(harmony, Logger, launch.Deck);
+#endif
         NativeStarterDecks.Initialize(Logger);
         NativeTurnTimerOption.Initialize(harmony, Logger, Config);
         NativeFpsCounter.Initialize(Logger, Config);

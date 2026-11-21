@@ -30,10 +30,10 @@ INSTALLER = Path(__file__).resolve().parent
 REPO = INSTALLER.parent
 APP = Path("Hearthstone.app")
 MANAGED = APP / "Contents/Resources/Data/Managed"
-GAME_FILES = ("Data", ".build.info", ".product.db")
-BEPINEX_URL = ("https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/"
-               "BepInEx_macos_universal_5.4.23.5.zip")
-BEPINEX_HASH = "01c2ae782eb016dfd6c345a18dbd2dcafffb3d9d318449d6486689f426b4a323"
+GAME_FILES = ("Data", "Strings", ".build.info", ".product.db")
+BEPINEX_URL = ("https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.6/"
+               "BepInEx_macos_universal_5.4.23.6.zip")
+BEPINEX_HASH = "2e711e21f6570da964fce4654b1976500dbe043f61778bce0008500078564638"
 MONO_INPUTS = INSTALLER / "loader-inputs-mirror-candidate.json"
 MONO_MIRROR = ("https://raw.githubusercontent.com/Pik-4/HsMod/551d4423d789c7316303376b616688dafbf05c6c/"
                "HsMod/UnstrippedCorlibUinx/")

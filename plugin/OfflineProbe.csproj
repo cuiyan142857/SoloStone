@@ -4,6 +4,9 @@
     <Installer>true</Installer>
     <DefineConstants>$(DefineConstants);SOLOSTONE_MACOS</DefineConstants>
   </PropertyGroup>
+  <ItemGroup Condition="'$(MacPreview)' == 'true'">
+    <Compile Remove="NativePowerSource.cs" />
+  </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <LangVersion>latest</LangVersion>
