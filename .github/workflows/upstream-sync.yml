@@ -1,0 +1,110 @@
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'cuiyan142857/SoloStone' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: upstream-sync
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare changes from the latest upstream release
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream=KeyStarr/SoloStone
+          tag=$(gh api "repos/$upstream/releases/latest" --jq .tag_name)
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch --no-tags "https://github.com/$upstream.git" "refs/tags/$tag"
+          incoming=$(git rev-parse 'FETCH_HEAD^{commit}')
+          base=$(git rev-parse HEAD)
+          checkpoint=.github/upstream-release
+          if [[ -f "$checkpoint" ]]; then
+            read -r previous < "$checkpoint"
+            [[ "$previous" =~ ^[0-9a-f]{40}$ ]]
+            # The previous release may live only in the upstream history after a squash.
+            git merge-base --is-ancestor "$previous" "$incoming"
+            if [[ "$previous" == "$incoming" ]]; then exit 0; fi
+          else
+            previous=$(git merge-base "$base" "$incoming")
+            if [[ "$previous" == "$incoming" ]]; then exit 0; fi
+          fi
+
+          # Avoid duplicating an open sync, including a manually created merge PR.
+          heads=$(gh pr list --base main --state open --limit 200 --json headRefName,headRefOid \
+            --jq '.[] | [.headRefName, .headRefOid] | @tsv')
+          while IFS=$'\t' read -r ref head; do
+            if [[ "$ref" == "feature/sync-upstream-$tag-"* ]] ||
+               { [[ -n "$head" ]] && git merge-base --is-ancestor "$incoming" "$head" 2>/dev/null; }; then
+              exit 0
+            fi
+          done <<< "$heads"
+
+          status=0
+          git merge-tree --write-tree --merge-base="$previous" "$base" "$incoming" > "$RUNNER_TEMP/sync-tree" || status=$?
+          if [[ "$status" == 1 ]]; then
+            echo "::error::Upstream $tag has conflicts with the fork. Resolve them in a PR."
+            cat "$RUNNER_TEMP/sync-tree"
+            exit 1
+          fi
+          [[ "$status" == 0 ]]
+          read -r tree < "$RUNNER_TEMP/sync-tree"
+
+          branch="feature/sync-upstream-$tag-${base:0:12}"
+          existing=$(gh pr list --base main --head "$branch" --state all --limit 1 --json number --jq '.[].number')
+          if [[ -n "$existing" ]]; then exit 0; fi
+          git switch --create "$branch"
+          git read-tree --reset -u "$tree"
+          printf '%s\n' "$incoming" > "$checkpoint"
+          git add -- "$checkpoint"
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "release: sync upstream $tag"
+          mkdir -p "$RUNNER_TEMP/sync-base" "$RUNNER_TEMP/sync-source"
+          git archive "$base" tools installer/stage.py | tar -x -C "$RUNNER_TEMP/sync-base"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/sync-source"
+          rules="$RUNNER_TEMP/sync-base/tools"
+          python3 -I "$rules/release_scan.py" --source "$RUNNER_TEMP/sync-source" --skip-git \
+            --allow-no-private-config --strict --trust-public-rules --public-rules "$rules/release_scan.public.json"
+          printf 'branch=%s\ntag=%s\n' "$branch" "$tag" >> "$GITHUB_OUTPUT"
+      - name: Push the branch and open a pull request
+        if: steps.sync.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          BRANCH: ${{ steps.sync.outputs.branch }}
+          TAG: ${{ steps.sync.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Configure UPSTREAM_SYNC_TOKEN in the upstream-sync environment."
+            exit 1
+          fi
+          gh auth setup-git
+          if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+            git diff --quiet "origin/$BRANCH" HEAD
+          else
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi
+          draft=()
+          if ! git diff --quiet HEAD^ HEAD -- engine plugin facts; then draft=(--draft); fi
+          gh pr create --base main --head "$BRANCH" --title "release: sync upstream $TAG" \
+            --body "Sync the published upstream source and record its commit for future squash merges." "${draft[@]}"

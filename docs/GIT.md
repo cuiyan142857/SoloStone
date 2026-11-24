@@ -38,6 +38,25 @@ How SoloStone's branches and commits are named, and how a change gets into `main
   subject, so write it as a commit subject (below).
 - Commit under one identity per person, with an email that person is happy to have public.
 
+## Syncing the macOS fork
+
+In `cuiyan142857/SoloStone`, the upstream sync workflow checks for the latest stable release of
+`KeyStarr/SoloStone` daily at 01:17 UTC and can also be run from Actions. It opens a PR for a clean
+merge, stops on conflicts, and leaves gameplay changes in draft for review. The sync PR stores the
+upstream commit in `.github/upstream-release` so the next sync can use the correct merge base after
+squashing.
+
+Create a GitHub Actions environment named `upstream-sync` with a deployment branch rule allowing
+only the `main` branch. Store a repository-scoped credential there as the `UPSTREAM_SYNC_TOKEN`
+environment secret. Grant it write access to Contents and Pull requests, plus Workflows if the
+upstream release changes workflow files. The separate credential lets sync PRs trigger CI. The
+environment branch rule keeps the sync credential out of pull request runs.
+
+With GitHub auto-merge enabled and the `tests`, `scan`, and `macos-preview` GitHub Actions checks
+required on `main`, the auto-merge workflow queues eligible ready PRs from the fork owner for a
+squash merge. Changes to gameplay, CI, or release tooling need manual review. The R7 and live drag
+requirements in [TESTING.md](TESTING.md#client-drop-prediction) apply to changes to played-card history.
+
 ## Commits
 
 ```text
