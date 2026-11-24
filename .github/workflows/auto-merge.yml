@@ -1,0 +1,49 @@
+name: auto-merge
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  queue:
+    if: >-
+      github.repository == 'cuiyan142857/SoloStone' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enable squash auto-merge when required checks are enforced
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Skip changes to gameplay and CI that may need verification outside CI.
+          paths=$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)
+          if grep -Ev '^\.github/upstream-release$' <<< "$paths" |
+             grep -E '^(engine/|plugin/|facts/|tests/|\.github/|tools/|global\.json$)' > /dev/null; then
+            queued=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json autoMergeRequest --jq '.autoMergeRequest != null')
+            if [[ "$queued" == true ]]; then
+              gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto
+            fi
+            exit 0
+          fi
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main")
+          for check in tests scan macos-preview; do
+            if ! jq -e --arg check "$check" '
+              any(.[] | select(.type == "required_status_checks") |
+                .parameters.required_status_checks[]; .context == $check and .integration_id == 15368)
+            ' <<< "$rules" > /dev/null; then
+              echo "::notice::Auto-merge requires a main ruleset with GitHub Actions check $check."
+              exit 0
+            fi
+          done
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash --match-head-commit "$HEAD_SHA"
