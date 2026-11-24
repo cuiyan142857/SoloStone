@@ -682,7 +682,8 @@ public static class AutoCastProof
         Check(!wire.Any(e => e.HasPowerStart && e.PowerStart.Source == top.Id && (int)e.PowerStart.Type == (int)BlockType.PLAY), name + ": no PLAY block");
         int trigger = wire.FindIndex(e => e.HasPowerStart && e.PowerStart.Source == top.Id && (int)e.PowerStart.Type == (int)BlockType.TRIGGER);
         int named = wire.FindIndex(e => e.HasShowEntity && e.ShowEntity.Entity == top.Id && e.ShowEntity.Name == card);
-        Check(trigger >= 0 && named >= 0 && (owner == 1 || named > trigger), name + ": named (the opponent's inside its TOPDECK trigger) (named=" + named + " trigger=" + trigger + ")");
+        // #195, retail SCH_307t/AT_035t: both seats name the card in its REVEALED draw SHOW, before the TOPDECK trigger.
+        Check(trigger >= 0 && named >= 0 && named < trigger, name + ": named by its draw SHOW before its TOPDECK trigger (named=" + named + " trigger=" + trigger + ")");
         return 0;
     }
 

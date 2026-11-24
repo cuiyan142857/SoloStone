@@ -208,4 +208,70 @@ internal static partial class NativeUIProbe
         catch (Exception error) { log.LogError("NATIVE_DECK status message failed: " + error); }
         return false;
     }
+
+    // Sharing a deck (#220) is the client's own Copy in the deck options: it writes the retail text (name, class, format, the
+    // card list, the code). What the last copy put on the clipboard, for the log and test control.
+    internal static long LastCopyDeckId;
+    internal static string LastCopyText = "", LastCopyCode = "", LastCopyError = "";
+    internal static int LastCopyCards, LastCopySideboardCards, LastCopyHero, LastCopyFormat;
+
+    // Prefix of ShareableDeck.ParseDataFromDeckString (the pasted-text reader behind every paste). The client takes the first
+    // line that does not start with '#'. Text copied from a Discord message loses the '#' of its heading lines, so that line is
+    // the deck name; read the code from the line that is one instead. Text the client reads already is left to it.
+    private static bool FindPastedDeckCode(string __0, ref string __1, ref string __result)
+    {
+        if (!active) return true;
+        try
+        {
+            string code = DeckCodeText.FindCode(__0, out string name, out bool rescued);
+            if (!rescued) return true;
+            __result = code;
+            __1 = name.Length > CollectionDeck.DefaultMaxDeckNameCharacters ? name.Substring(0, CollectionDeck.DefaultMaxDeckNameCharacters) : name; // as the client cuts it
+            log.LogInfo("NATIVE_DECK paste read the code from a later line (text without its '#' header)");
+            return false;
+        }
+        catch (Exception error)
+        {
+            log.LogError("NATIVE_DECK paste text check failed: " + error);
+            return true;
+        }
+    }
+
+    // Finalizer of DeckOptionsMenu.OnCopyButtonReleased: log what the client's Copy wrote (deck, counts, the code) or why it failed.
+    private static void ObserveDeckCopy(Exception __exception)
+    {
+        if (!active) return;
+        try
+        {
+            var edited = CollectionManager.Get()?.GetEditedDeck();
+            LastCopyDeckId = edited?.ID ?? 0;
+            if (__exception != null)
+            {
+                LastCopyError = __exception.GetBaseException().Message;
+                log.LogError("NATIVE_DECK copy failed deck=" + LastCopyDeckId + ": " + __exception);
+                return;
+            }
+            // Only a deck code is ever kept or logged: if the client's write to the clipboard failed, it still holds whatever the
+            // player had copied before, which must not reach the log.
+            string text = UnityEngine.GUIUtility.systemCopyBuffer ?? "";
+            string found = DeckCodeText.FindCode(text, out string name);
+            var data = DeckCodeText.TryDecode(found);
+            string code = data == null ? "" : found;
+            if (data == null) name = "";
+#if !SOLOSTONE_RELEASE
+            LastCopyText = data == null ? "" : text.Length <= 4096 ? text : text.Substring(0, 4096); // test control only
+#endif
+            LastCopyCode = code;
+            LastCopyCards = data?.CardCount ?? 0; LastCopySideboardCards = data?.Sideboards.Sum(card => card.qty) ?? 0;
+            LastCopyHero = data?.Hero ?? 0; LastCopyFormat = data?.Format ?? 0;
+            // A clipboard write that failed can leave an older code there: only this deck's own code counts as copied.
+            string expected = edited?.GetShareableDeck()?.Serialize(false) ?? "";
+            LastCopyError = data == null ? "the clipboard holds no deck code"
+                : code != expected ? "the clipboard holds another deck's code" : "";
+            if (LastCopyError.Length > 0) { log.LogWarning("NATIVE_DECK copy not confirmed deck=" + LastCopyDeckId + ": " + LastCopyError); return; }
+            log.LogInfo("NATIVE_DECK copied deck=" + LastCopyDeckId + " cards=" + LastCopyCards + " sideboardCards=" + LastCopySideboardCards
+                + " hero=" + LastCopyHero + " format=" + LastCopyFormat + " nameLength=" + name.Length + " code=" + LastCopyCode);
+        }
+        catch (Exception error) { log.LogError("NATIVE_DECK copy check failed: " + error); }
+    }
 }

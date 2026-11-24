@@ -33,7 +33,7 @@ namespace SabberStoneCore.CardSets.Client.Sets
                     var tied=enemies.Where(e=>e.Health==lowest).ToArray();
                     var victim=tied[g.Random.Next(tied.Length)];
                     Generic.AddEnchantmentBlock(g,Cards.FromId("BE_287e2"),(IPlayable)s,victim);
-                    if(victim.Health<=0) victim.ToBeDestroyed=true;
+                    HealthLossRules.MarkIfDepleted(victim);
                     Generic.AddEnchantmentBlock(g,Cards.FromId("BE_287e"),(IPlayable)s,s);
                 }
             }) };

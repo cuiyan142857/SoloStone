@@ -29,6 +29,8 @@ internal static class QueuedSummonHistoryProof
             ("FP1_002x2", TwoCreepers), ("FP1_031", Rivendare), ("FP1_002+EX1_096", CreeperAndHoarder),
             ("chained-continuations", ChainedContinuations), ("ICC_054", SpreadingPlague), ("ICC_041", Defile),
             ("dormant-copy", DormantCopy),
+            ("created-in-play-boundaries", CreatedInPlayBoundaries), ("refused-fold-order", RefusedFoldOrder),
+            ("summon-slot", SummonSlot), ("untouchable-slot", UntouchableSlot),
             // Negative cases: these keep their own shape.
             ("LOOT_093", RecruitFromDeck), ("summon-from-hand", SummonFromHand), ("UNG_854", DiscoverThenSummon),
             ("own-hit", ChildWithOwnHit), ("TRL_232", OverkillSummon) })
@@ -49,6 +51,116 @@ internal static class QueuedSummonHistoryProof
         foreach (var player in new[] { game.Player1, game.Player2 })
             foreach (var card in player.HandZone.ToArray()) player.SetasideZone.Add(player.HandZone.Remove(card));
         return game;
+    }
+
+    private static void CreatedInPlayBoundaries()
+    {
+        foreach (bool inPlay in new[] { false, true })
+        foreach (bool productionOrder in new[] { false, true })
+        foreach (string boundary in new[] { "block-before", "subspell-before", "flush-before", "block-after", "subspell-after", "flush-after" })
+        {
+            var g = NewGame(); var p = g.Player1; var h = g.PowerHistory;
+            var source = Summon(p, "CS2_182"); var right = Summon(p, "CS2_182");
+            var from = (h.Full.Count, h.Last.Count);
+            void Edge()
+            {
+                if (boundary.StartsWith("block")) h.Add(new PowerHistoryBlockStart { BlockType = BlockType.POWER, Source = source.Id });
+                else if (boundary.StartsWith("subspell")) h.Add(new PowerHistorySubSpellStart { Source = source.Id });
+                else h.Last.Clear();
+            }
+            if (boundary.EndsWith("before")) Edge();
+            var minion = (Minion)Entity.FromCard(p, Cards.FromId("CS2_182"),
+                inPlay ? new EntityData { [GameTag.ZONE] = (int)Zone.PLAY } : null);
+            // SummonPhase records the insertion cursor after creation.
+            if (productionOrder) from = (h.Full.Count, h.Last.Count);
+            if (boundary.EndsWith("after")) Edge();
+            minion.Damage = 1;
+            p.BoardZone.Add(minion, 1);
+            var full = h.Full.OfType<PowerHistoryFullEntity>().Single(e => e.Entity.Id == minion.Id);
+            var before = h.Full.ToArray();
+            bool published = h.PublishCreatedInPlay(minion, from);
+            string name = $"{boundary} inPlay={inPlay} productionOrder={productionOrder}";
+            if (boundary.EndsWith("before"))
+            {
+                // Retail 186852_hearthstone_access_eoe.power.log:3333-3338: state belongs in FULL; an edge/flush
+                // before creation only prevents relocation when the insertion cursor still includes that boundary.
+                Core2026Proof.Check(published && full.Entity.Tags[GameTag.ZONE_POSITION] == 2
+                    && full.Entity.Tags[GameTag.DAMAGE] == 1 && full.HealthIsMaximum
+                    && full.Entity.Tags[GameTag.HEALTH] == minion.Health + minion.Damage, name + ": fold state and maximum Health");
+                int shift = h.Full.FindIndex(e => e is PowerHistoryTagChange t
+                    && t.EntityId == right.Id && t.Tag == GameTag.ZONE_POSITION);
+                Core2026Proof.Check(shift >= 0 && (shift < h.Full.IndexOf(full)) == productionOrder,
+                    name + ": relocate shifts only within insertion boundary");
+                Core2026Proof.Check(!h.Full.OfType<PowerHistoryTagChange>().Any(t => t.EntityId == minion.Id),
+                    name + ": own state folded");
+            }
+            else
+            {
+                Core2026Proof.Check(published == (inPlay && !boundary.StartsWith("flush"))
+                    && h.Full.SequenceEqual(before) && !full.HealthIsMaximum
+                    && (!full.Entity.Tags.TryGetValue(GameTag.ZONE_POSITION, out int position) || position == 0),
+                    name + ": touched/flushed creation stays unchanged");
+            }
+        }
+    }
+
+    private static void RefusedFoldOrder()
+    {
+        var g = NewGame(); var p = g.Player1; var h = g.PowerHistory;
+        Summon(p, "CS2_182"); Summon(p, "CS2_182");
+        var minion = (Minion)Entity.FromCard(p, Cards.FromId("CS2_182"));
+        minion.Damage = 1;
+        // An own row absent from Full before the insertion cursor must refuse the fold before moving neighbours.
+        h.Full.Remove(h.Last.OfType<PowerHistoryTagChange>().Single(t => t.EntityId == minion.Id && t.Tag == GameTag.DAMAGE));
+        var from = (h.Full.Count, h.Last.Count);
+        p.BoardZone.Add(minion, 1);
+        var full = h.Full.ToArray(); var last = h.Last.ToArray();
+        Core2026Proof.Check(!h.PublishCreatedInPlay(minion, from) && h.Full.SequenceEqual(full) && h.Last.SequenceEqual(last),
+            "refused fold leaves both history lists in their original order");
+    }
+
+    private static void SummonSlot()
+    {
+        var g = NewGame(); var p = g.Player1;
+        var source = Summon(p, "CS2_182");
+        var right = new[] { Summon(p, "CS2_182"), Summon(p, "CS2_182"), Summon(p, "CS2_182") };
+        int cursor = g.PowerHistory.Full.Count;
+        new SummonTask("CS2_231", SummonSide.RIGHT).Process(g, p, source, null);
+        var minion = p.BoardZone.Single(m => m.Card.Id == "CS2_231");
+        var rows = g.PowerHistory.Full.Skip(cursor).ToList();
+        var full = rows.OfType<PowerHistoryFullEntity>().Single(f => f.Entity.Id == minion.Id);
+        var shifts = rows.OfType<PowerHistoryTagChange>().Where(t => t.Tag == GameTag.ZONE_POSITION
+            && right.Any(m => m.Id == t.EntityId)).ToList();
+        Core2026Proof.Check(shifts.Select(t => t.EntityId).SequenceEqual(right.Reverse().Select(m => m.Id))
+            && shifts.All(t => rows.IndexOf(t) < rows.IndexOf(full)
+                && t.Value == right.Single(m => m.Id == t.EntityId).ZonePosition + 1),
+            "every right neighbour shifts before FULL, highest position first");
+        Core2026Proof.Check(minion.ZonePosition == 1 && full.Entity.Tags[GameTag.ZONE] == (int)Zone.PLAY
+            && full.Entity.Tags[GameTag.ZONE_POSITION] == minion.ZonePosition + 1,
+            "normal SummonTask FULL carries PLAY and final nonzero mid-row slot");
+        Core2026Proof.Check(!rows.OfType<PowerHistoryTagChange>().Any(t => t.EntityId == minion.Id && t.Tag == GameTag.ZONE_POSITION)
+            && !rows.OfType<PowerHistoryShowEntity>().Any(), "no own position TAG_CHANGE or SHOW_ENTITY");
+    }
+
+    private static void UntouchableSlot()
+    {
+        foreach (bool second in new[] { false, true })
+        {
+            var g = NewGame(); var p = second ? g.Player2 : g.Player1;
+            var source = Summon(p, "CS2_182"); var right = Summon(p, "CS2_182");
+            int cursor = g.PowerHistory.Full.Count;
+            new SummonTask("UNG_829t2", SummonSide.RIGHT).Process(g, p, source, null);
+            var portal = p.BoardZone.Single(m => m.Card.Id == "UNG_829t2");
+            var rows = g.PowerHistory.Full.Skip(cursor).ToList();
+            var full = rows.OfType<PowerHistoryFullEntity>().Single(f => f.Entity.Id == portal.Id);
+            int shift = rows.FindIndex(e => e is PowerHistoryTagChange t && t.EntityId == right.Id && t.Tag == GameTag.ZONE_POSITION);
+            // Same retail insertion shape as 186852_hearthstone_access_eoe.power.log:3402-3407, including permanents.
+            Core2026Proof.Check(portal.Untouchable && full.Entity.Tags[GameTag.ZONE_POSITION] == 2
+                && !rows.OfType<PowerHistoryTagChange>().Any(t => t.EntityId == portal.Id && t.Tag == GameTag.ZONE_POSITION)
+                && shift >= 0 && shift < rows.IndexOf(full)
+                && !rows.OfType<PowerHistoryShowEntity>().Any(e => e.Entity.Id == portal.Id),
+                "Untouchable summon uses created-in-play slot publication on both seats");
+        }
     }
 
     private static void Hounds()

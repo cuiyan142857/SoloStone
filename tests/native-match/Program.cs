@@ -85,6 +85,7 @@ internal static partial class Program
         if (args.Contains("--softlock-only")) { NativeMatch.ClockFreeBot = true; ForefatherGuessNative(); AnnouncerRewindDeathKnightNative(); ForefatherFromDiscoverNative(); ForefatherNpcGuessNative(); NpcGuessForcedPicksNative(); NpcGuessTwoHeldNative(); NpcGuessHeldThenHumanGuessNative(); GlimmerrootGuessNative(); TimedChoiceCompletionNative(); return; }
         if (args.Contains("--ledgerline-only")) { NativeMatch.ClockFreeBot = true; NpcWorldIntegrationTests.LedgerlineForefatherGuess(); return; }
         if (args.Contains("--match-event-log-review-only")) { NativeMatch.ClockFreeBot = true; MatchEventLogReview(); return; }
+        if (args.Contains("--event-log-corrections-only")) { NativeMatch.ClockFreeBot = true; EventLogFollowsTransportCorrections(); return; }
         if (args.Contains("--match-event-log-only")) { NativeMatch.ClockFreeBot = true; MatchEventLogNative(); return; }
         if (args.Contains("--held-form-overlay-only")) { NativeMatch.ClockFreeBot = true; HeldFormOverlayHistory(); return; }
         if (args.Contains("--temporary-only")) { NativeMatch.ClockFreeBot = true; TemporaryVisualHistory(args.ElementAtOrDefault(1)); return; }
@@ -112,6 +113,9 @@ internal static partial class Program
         if (args.Contains("--morchie-rewind-only")) { NativeMatch.ClockFreeBot = true; MorchieRewindChoices(); return; }
         if (args.Contains("--rewind-settlement-only")) { NativeMatch.ClockFreeBot = true; RewindSettlementNoOp(args.ElementAtOrDefault(1)); return; }
         if (args.Contains("--play-effect-once-only")) { NativeMatch.ClockFreeBot = true; PlayEffectOnceHistory(); return; }
+        if (args.Contains("--effect-summon-slot-only")) { NativeMatch.ClockFreeBot = true; EffectSummonSlotHistory(); return; }
+        if (args.Contains("--leave-board-only")) { NativeMatch.ClockFreeBot = true; LeaveBoardHistory(); return; }
+        if (args.Contains("--escape-artist-only")) { NativeMatch.ClockFreeBot = true; EscapeArtistLeavesHistory(); return; }
         if (args.Contains("--king-llane-only")) { NativeMatch.ClockFreeBot = true; KingLlanePlayHistory(); return; }
         if (args.Contains("--vanguard-only")) { NativeMatch.ClockFreeBot = true; VanguardDrawHistory(); return; }
         if (args.Contains("--broxigar-only")) { NativeMatch.ClockFreeBot = true; BroxigarReturnHistory(); return; }
@@ -160,6 +164,7 @@ internal static partial class Program
         if (args.Contains("--npc-pets-only")) { NpcPets_(); return; }
         if (args.Contains("--pet-likes-only")) { PetLikesAndTreats(); return; }
         PlayerTurnTimerTests();
+        LossRewardParticipationNative();
         RewindPresentationTags();
         CoinFlipTests();
         DebugScenarioTests();
@@ -203,6 +208,7 @@ internal static partial class Program
         if (args.Contains("--auto-cast-only")) { AutomaticQuestHistory(); AutomaticSecretHistory(); FacelessEnigmaHistory(); return; }
         if (args.Contains("--overdraw-only")) { OverdrawHistory(); return; }
         if (args.Contains("--draw-spell-only")) { DrawSpellHistory(); return; }
+        if (args.Contains("--quest-complete-only")) { NativeMatch.ClockFreeBot = true; QuestCompleteHistory(); return; }
         if (args.Contains("--subspell-only")) { ModernSubSpellHistory(); return; }
         if (args.Contains("--spell-vfx-only")) { SpellVfxHistory(); return; }
         if (args.Contains("--defile-only")) { DefilePrivateTagsNeverReachWire(); return; }
@@ -242,6 +248,7 @@ internal static partial class Program
         ChillmawHistory();
         TriggerVisualKeywordHistory();
         DrawSpellHistory();
+        QuestCompleteHistory();
         OverdrawHistory();
         ChaosStrikeHistory();
         CthunNativeProof();
@@ -263,6 +270,7 @@ internal static partial class Program
         BroxigarReturnHistory();
         KingLlanePlayHistory();
         PlayEffectOnceHistory();
+        EffectSummonSlotHistory();
         AnnouncerRewindHistory();
         RewindAfterOpposingBurn();
         RewindAfterAttemptBurn();
@@ -294,6 +302,8 @@ internal static partial class Program
             return;
         }
         ForcedAttackReadinessIsPublished();
+        LeaveBoardHistory();
+        EscapeArtistLeavesHistory();
         TransformCopyReadinessIsPublished();
         BefuddledCopyStateIsPublished();
         if (args.Contains("--reveal-animation-only"))
@@ -375,6 +385,7 @@ internal static partial class Program
         AuraQueuedCallerPathsRestoreCosts();
         AuraCorrectionOrderAndLifetime();
         AuraCorrectionsRespectReplayVisibility();
+        EventLogFollowsTransportCorrections();
         Console.WriteLine("PASS native match contract");
     }
 
@@ -1511,6 +1522,7 @@ internal static partial class Program
             capture.SerializeAll();
         }
         JadeCoinSequence();
+        HeraldDefinitionHistory();
         Check(NativeMatch.TransportCardId("CFM_712_t31") == "CFM_712_t31" && NativeMatch.TransportCardId(null) == "", "Jade mapping is bounded to legacy identities");
         Console.WriteLine("PASS Jade Golem projection: 30 legacy sizes, four pinned native identities, exact printed and current stats");
     }
@@ -1907,9 +1919,8 @@ internal static partial class Program
             Check(match.Game.State == State.COMPLETE, "pairing did not finish " + human.Id + "/" + bot.Id);
             Check(errors.Count == 0, "Search exceptions in " + human.Id + "/" + bot.Id + ": " + string.Join(";",errors));
             string outcome = match.Game.Player1.PlayState == PlayState.WON ? "Won" : match.Game.Player1.PlayState == PlayState.LOST ? "Lost" : "Tied";
-            // V6: a completed loss/draw pays a rounded third of the same win roll.
-            expectedGold += profile.GrindTier.Gold(LocalEconomy.RewardV6(outcome, match.Game.Turn, false,
-                LocalEconomy.RewardRollSeed(pending.Id, pending.Seed)).Gold);
+            expectedGold += LocalEconomy.RewardV7(outcome, match.Game.Turn, false, new LocalRewardFacts(),
+                LocalEconomy.RewardRollSeed(pending.Id, pending.Seed), profile.GrindTier).Gold;
             if (outcome == "Won") wins++;
             var priorLadder = expectedLadder ?? profile.Ladder;
             expectedLadder = LadderRules.Apply(priorLadder, LadderRules.Outcome(outcome), priorLadder.Rating).After;
@@ -3244,6 +3255,57 @@ internal static partial class Program
         Check(spell[GameTag.COST] == 3 && aura.AppliedEntities.Any(entity => entity.Id == spell.Id),
             "Sorcerer caller fixture did not apply exact hand discount");
         return (capture, match, game, owner, aura, spell);
+    }
+
+    // The real hook-up: NativeMatch hands the match event log the corrections recorded for the batch and position it observes, and
+    // consumes them after the log has read them. The log follows a correction the client is sent (a public human minion), skips one
+    // it is not (an opponent's hand card), ignores one recorded for another batch, and never sees one twice.
+    private static void EventLogFollowsTransportCorrections()
+    {
+        var capture = new Capture();
+        var match = StartFixture(capture, "CS2_231", null);
+        var lines = new List<string>();
+        match.EventTrace = lines.Add;
+        EngineGame game = match.Game;
+        var yeti = (Minion)SabberStoneCore.Model.Entities.Entity.FromCard(game.Player1, Cards.FromId("CS2_182"), zone: game.Player1.BoardZone);
+        var hidden = SabberStoneCore.Model.Entities.Entity.FromCard(game.Player2, Cards.FromId("CS2_182"), zone: game.Player2.HandZone);
+        SendHistoryEntries(match, new List<SabberStoneCore.Kettle.IPowerHistoryEntry> {
+            SabberStoneCore.Kettle.PowerHistoryBuilder.TagChange(game.Id, GameTag.TURN, 1),   // past the log's setup phase
+            SabberStoneCore.Kettle.PowerHistoryBuilder.FullEntity(yeti), SabberStoneCore.Kettle.PowerHistoryBuilder.FullEntity(hidden) });
+        lines.Clear();
+        var a6 = new Dictionary<GameTag, int> { [GameTag.ATK] = 6 };   // made-up: the engine's Yeti keeps 4 Attack
+        List<SabberStoneCore.Kettle.IPowerHistoryEntry> Batch() => new List<SabberStoneCore.Kettle.IPowerHistoryEntry> {
+            SabberStoneCore.Kettle.PowerHistoryBuilder.TagChange(game.Id, GameTag.NEXT_STEP, (int)Step.MAIN_ACTION) };
+        // The made-up 6 Attack reaches the log as a stat change, or as the RESYNC against the engine's 4 that follows it.
+        bool Followed(int id) => lines.Any(l => l.Contains("#" + id + "(") && (l.Contains(" STATS ") && l.Contains("->6/") || l.Contains(" RESYNC ") && l.Contains("tracked=6/")));
+
+        var other = Batch();
+        match.RecordTransportCorrection(other, 1, yeti.Id, a6, true);
+        SendHistoryEntries(match, Batch());
+        Check(!Followed(yeti.Id), "a correction recorded for another batch reached the log:\n" + string.Join("\n", lines));
+
+        var batch = Batch();
+        match.RecordTransportCorrection(batch, 1, yeti.Id, a6, true);
+        match.RecordTransportCorrection(batch, 1, hidden.Id, new Dictionary<GameTag, int> { [GameTag.ARMOR] = 3 }, true);   // ARMOR is logged in any zone
+        SendHistoryEntries(match, batch);
+        Check(Followed(yeti.Id), "the log did not follow a public correction:\n" + string.Join("\n", lines));
+        Check(!lines.Any(l => l.Contains("#" + hidden.Id + "(")), "the log followed a correction on an opponent's hand card:\n" + string.Join("\n", lines));
+
+        // The consumed correction sits at index 1; the same list grows by one entry, so the log reads position 1 again: it must
+        // find nothing there.
+        lines.Clear();
+        batch.Add(SabberStoneCore.Kettle.PowerHistoryBuilder.TagChange(game.Id, GameTag.NEXT_STEP, (int)Step.MAIN_ACTION));
+        SendHistoryEntries(match, batch);
+        Check(!Followed(yeti.Id), "a consumed correction reached the log twice:\n" + string.Join("\n", lines));
+
+        // An entity the transport never revealed (a card in the human's hand, no history sent for it) gets no correction line.
+        var unrevealed = SabberStoneCore.Model.Entities.Entity.FromCard(game.Player1, Cards.FromId("CS2_182"), zone: game.Player1.HandZone);
+        lines.Clear();
+        var third = Batch();
+        match.RecordTransportCorrection(third, 1, unrevealed.Id, new Dictionary<GameTag, int> { [GameTag.ARMOR] = 3 }, true);
+        SendHistoryEntries(match, third);
+        Check(!lines.Any(l => l.Contains("#" + unrevealed.Id + "(")), "the log followed a correction on an unrevealed entity:\n" + string.Join("\n", lines));
+        Console.WriteLine("PASS event log follows the transport's corrections: public followed, hidden and foreign skipped, consumed once");
     }
 
     private static void AuraCorrectionsRespectReplayVisibility()

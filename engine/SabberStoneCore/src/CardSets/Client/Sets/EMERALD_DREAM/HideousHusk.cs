@@ -1,5 +1,5 @@
-using System;
 using System.Linq;
+using SabberStoneCore.Actions;
 using SabberStoneCore.EffectSystem;
 using SabberStoneCore.Enchants;
 using SabberStoneCore.Enums;
@@ -40,12 +40,12 @@ namespace SabberStoneCore.CardSets.Client.Sets
                     var ctx = new EffectContext(g, c.Id, s.Id, stack: stack);
                     int health = candidates.Min(m => m.Health);
                     var victim = ctx.SampleDistinct(candidates.Where(m => m.Health == health).ToArray(), 1)[0];
-                    int amount = Math.Min(Amount(source), victim.BaseHealth);
+                    int amount = HealthLossRules.StealAmount(victim, Amount(source));
                     // A Health enchantment, not damage: the victim keeps its damage, so its current Health falls with its
                     // maximum (a 1/3 minion with 2 damage that loses 1 dies), and the hero's maximum and current Health rise.
                     ctx.GiveBuff(victim.Id, "EDR_810e", amount);
                     // No damage is dealt, so nothing else marks a victim left at 0 Health for death.
-                    if (victim.Health <= 0) victim.ToBeDestroyed = true;
+                    HealthLossRules.MarkIfDepleted(victim);
                     ctx.GiveBuff(c.Hero.Id, "EDR_810e2", amount);
                 })
             } };

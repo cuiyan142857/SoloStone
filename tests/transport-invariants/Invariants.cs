@@ -47,10 +47,16 @@ internal static class Invariants
                 yield return new(entity.Card.Id, entity.Id, "RESET_ENTITY", "present", "absent");
                 continue;
             }
-            // Immolate's definition defaults describe Smoldering cards; only instance tags are live loop state.
+            // Smoldering hand fire follows its live countdown; retired offers never inherit definition-only fire.
             foreach (int tag in new[] { 2505, 2600 })
             {
                 int expected = shown.CardId.Length > 0 && entity.NativeTags.TryGetValue((GameTag)tag, out int value) ? value : 0;
+                if (shown.CardId.Length > 0 && !entity.NativeTags.ContainsKey((GameTag)tag)
+                    && (entity.Card.Id is "FIR_911" or "FIR_914" or "FIR_916") && Location(entity) == Zone.HAND)
+                {
+                    int remaining = Math.Clamp(entity[GameTag.TAG_SCRIPT_DATA_NUM_2], 0, 3);
+                    expected = tag == 2505 ? (remaining > 0 ? 1 : 0) : remaining;
+                }
                 if (shown.Get((GameTag)tag) != expected)
                     yield return new(entity.Card.Id, entity.Id, "RESET_ACTOR_STATE", expected.ToString(), shown.Get((GameTag)tag).ToString());
             }

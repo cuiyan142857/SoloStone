@@ -34,6 +34,7 @@ namespace SabberStoneCore.Model
             long next = _nextDecisionId, options = _optionsDecisionId;
             int entity = _idIndex, oop = _oopIndex;
             var boundaryDiagnostic = RewindBoundaryDiagnostic;
+            var cycleDiagnostic = CycleBudgetExhaustedDiagnostic;
             string evidence = HistoryFacts.EvidenceFailure ?? validated.HistoryFacts.EvidenceFailure;
             try
             {
@@ -44,6 +45,7 @@ namespace SabberStoneCore.Model
             finally
             {
                 RewindBoundaryDiagnostic = boundaryDiagnostic;
+                CycleBudgetExhaustedDiagnostic = cycleDiagnostic;
                 // Even an unexpected failure must not reuse decision or entity IDs already sent to the client.
                 _nextDecisionId = Math.Max(_nextDecisionId, next);
                 _optionsDecisionId = Math.Max(_optionsDecisionId, options);

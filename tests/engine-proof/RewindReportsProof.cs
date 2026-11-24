@@ -127,7 +127,8 @@ internal static partial class RewindProof
             Console.WriteLine($"INFO #159 after Egg deaths: summoned={game.SummonedMinions.Count}, dead={game.DeadMinions.Count}, queue={game.TaskQueue.IsQuiescent}, resolution={game.Resolution.IsQuiescent}");
             Check(game.Process(HeroPowerTask.Any(player)), "#159 Bronze activation accepted");
             Check(RewindTestHelpers.IsRewindOffered(game), "#159 Bronze must offer Rewind after deathrattle summons");
-            Check(diagnostics.Single().Contains("summoned=3") && diagnostics[0].StartsWith("Settling"), "#159 diagnosed exact boundary failure");
+            // #207: the Egg Deathrattle summons resolve in their own cleanup, so the boundary is clean and nothing is settled.
+            Check(game.SummonedMinions.Count == 0 && diagnostics.Count == 0, "#159 Deathrattle summons leave no settlement: " + string.Join("|", diagnostics));
             var sink = game.RewindBoundaryDiagnostic;
             Answer(game, true);
             Check(ReferenceEquals(sink, game.RewindBoundaryDiagnostic), "#159 native diagnostic sink survives Rewind restore");
@@ -292,10 +293,13 @@ internal static partial class RewindProof
         });
         Generic.SummonBlock(capped, (Minion)Entity.FromCard(owner, Cards.FromId("CS2_231")), -1, null);
         var warnings = new List<string>(); capped.RewindBoundaryDiagnostic = warnings.Add;
-        Check(!SabberStoneCore.Model.Rewind.RewindRules.TryBegin(capped, PlayCardTask.Any(owner, card)) && deaths == 64 &&
-            warnings.Count(w => w.StartsWith("Settlement limit=64")) == 1 && capped.SummonedMinions.Count == 1,
-            "F5 pathological summon/death settlement stops at 64 and warns");
-        Console.WriteLine("PASS F1/F5 boundary guards: both seats, full board, legacy choice; summon/death cycle capped at 64 with warning");
+        var limits = new List<string>(); capped.CycleBudgetExhaustedDiagnostic = limits.Add;
+        // The settlement's first cleanup resolves the cycle itself; the shared cycle budget ends the game in a draw.
+        Check(!SabberStoneCore.Model.Rewind.RewindRules.TryBegin(capped, PlayCardTask.Any(owner, card)) && deaths == Game.MaxCleanupCycles / 2 &&
+            capped.State == State.COMPLETE && owner.PlayState == PlayState.TIED && owner.Opponent.PlayState == PlayState.TIED &&
+            limits.Count == 1 && warnings.Count(w => w.StartsWith("Settlement limit=")) == 0 && capped.SummonedMinions.Count == 0 && capped.Rewind == null,
+            "F5 pathological summon/death settlement stops at the cleanup cycle budget in a draw");
+        Console.WriteLine("PASS F1/F5 boundary guards: both seats, full board, legacy choice; summon/death cycle ends in a draw at the cleanup cycle budget");
     }
 
     internal static void ReportRegressions(string only = null)

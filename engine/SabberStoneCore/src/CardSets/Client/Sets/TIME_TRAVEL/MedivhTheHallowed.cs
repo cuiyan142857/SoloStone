@@ -50,7 +50,7 @@ namespace SabberStoneCore.CardSets.Client.Sets
                         for(int i=0;i<2 && !c.BoardZone.IsFull;i++) {
                             var chosen=OfflineCardPools.Pick(g,CombatTimeTravelPools.EightCostMinion(),c.HeroClass,120068, PoolDestination.Summon);
                             if(chosen==null) break;
-                            g.OnRandomHappened(true); ctx.Summon(chosen.Id);
+                            g.OnRandomHappened(true); ctx.SummonAtLocation(chosen.Id);
                             g.DeathProcessingAndAuraUpdate();
                         }
                     }) } };

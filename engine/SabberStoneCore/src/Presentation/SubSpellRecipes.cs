@@ -198,8 +198,7 @@ namespace SabberStoneCore.Presentation
             Add("EDR_261", VisualPhase.BoardBuff, "ReuseFX_Beast_BuffImpact_Paw_NatureGlow_Super:3dcd14b24f512c84fb7ac2a5ee3a7041");
             Add("EDR_261e", VisualPhase.BoardBuff, "ReuseFX_Beast_BuffImpact_Paw_NatureGlow_Super:3dcd14b24f512c84fb7ac2a5ee3a7041",
                 block: BlockType.TRIGGER, keyword: (int)GameTag.DEATHRATTLE);
-            Add("JAIL_877", VisualPhase.Summon, "ReuseFX_Beast_OverrideSpawn_Paw_Super:29a1f72abe98b3345942b34844a75370",
-                VisualTargets.None, source: VisualSource.Effect);
+            // Owner's retail video shows Underbelly Network's Rat just appearing; use the standard spawn.
             Add("JAIL_454", VisualPhase.Summon,
                 "ReuseFX_Necrotic_DeathKnight_OverrideSpawn_FromGround_Super:18936aca8a333214ba05320a8816a173", VisualTargets.None);
             return result;

@@ -1311,7 +1311,7 @@ namespace SabberStoneCore.CardSets
 			{
 				PowerTask = ComplexTask.Create(
 					new IncludeTask(EntityType.ALLMINIONS),
-					new MoveToDeck(EntityType.STACK))
+					new MoveToDeck(EntityType.STACK, opponent: true))
 			}));
 
 			// ----------------------------------------- SPELL - PRIEST

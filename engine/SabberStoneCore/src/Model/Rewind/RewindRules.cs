@@ -60,7 +60,8 @@ namespace SabberStoneCore.Model.Rewind
         {
             settled = false;
             if (!WouldBegin(game, task)) return false;
-            // Deathrattles can append summons after cleanup's summon catch-up. Settle them before taking the baseline.
+            // Summons left pending (after a choice) are settled before taking the baseline. A cleanup resolves its own
+            // Deathrattle and Reborn summons (#207), so the 64-iteration cap below is a guard, not a path the proofs reach.
             if (!game.IsSnapshotBoundary && !game.ResolvingPlayerAction && game.Resolution.IsQuiescent && game.TaskQueue.IsQuiescent)
             {
                 if (!IsLegalTask(game, task)) return false;

@@ -83,5 +83,12 @@ internal sealed partial class NativeTestControl
             { "popupHeader", info?.m_headerText }, { "popupText", info?.m_text }
         };
     }
+
+    // Sharing a deck (#220): what the client's own Copy in the deck options last wrote (the full clipboard text and its code).
+    private static JsonNode DeckExportState() => new JsonNode {
+        { "deckId", NativeUIProbe.LastCopyDeckId }, { "cards", NativeUIProbe.LastCopyCards }, { "sideboardCards", NativeUIProbe.LastCopySideboardCards },
+        { "hero", NativeUIProbe.LastCopyHero }, { "format", NativeUIProbe.LastCopyFormat }, { "code", NativeUIProbe.LastCopyCode },
+        { "text", NativeUIProbe.LastCopyText }, { "error", NativeUIProbe.LastCopyError }
+    };
 }
 #endif

@@ -33,6 +33,8 @@ public sealed class NativeMatch
     private const int BotPlayerId = 2;
     private const int MaxBotActions = 128;
     private const int CurrentSpellPowerBaseTag = 291;
+    // Retail summon source (see PowerHistoryBuilder); masked when its source is hidden from this seat.
+    private const GameTag SummonSourceTag = (GameTag)1254;
     // Engine-side Temporary tag. The client's TagVisualConfiguration reads GHOSTLY (785) for the Temporary hand look, not 3630,
     // so transport projects Temporary onto GHOSTLY; an Echo card's own GHOSTLY stays independent of it.
     private const GameTag TemporaryCardTag = (GameTag)3630;
@@ -118,6 +120,7 @@ public sealed class NativeMatch
         (GameTag)1077, // CASTS_WHEN_DRAWN: TooltipPanelManager reads the Casts When Drawn keyword.
         (GameTag)4706, // Exported either-side placement companion flag.
         (GameTag)4717, // Hero spell 330: Godfrey's persistent deck portal.
+        (GameTag)4398, // PLAYER_DEATHRATTLE: hero tag holding the entity id of the card PlayerDeathrattle shows beside the hero skull.
         (GameTag)3128, // SUMMONED_WHEN_DRAWN: exported Tortollan Ninja keyword.
         GameTag.DISPLAY_CARD_ON_MOUSEOVER, // Card and DisplayCardsInToolip show related cards.
         GameTag.REBORN, // EntityBase.HasReborn and Card death presentation.
@@ -248,6 +251,10 @@ public sealed class NativeMatch
         (GameTag)4162, // DYNAMIC_KEYWORD2: DynamicKeywordCardTextBuilder and keyword help resolve keyword two.
         (GameTag)4174, // DONT_PLAY_VFX_FROM_EXTRA_TRIGGERED_POWER: TriggerSpellController suppresses duplicate effects.
         (GameTag)4213, // SUPPRESS_IMMOLATE_VISUAL_FOR_OPPONENT: Actor.UpdateImmolating controls opponent visuals.
+        // IMMOLATESTAGE before IMMOLATING: on discard the stage must reach 0 while the fire is still on, so the client's
+        // Actor.UpdateImmolating plays the burn-up stage instead of going straight to Idle.
+        (GameTag)2600, // IMMOLATESTAGE: Actor.UpdateImmolating selects the countdown's fire stage.
+        (GameTag)2505, // IMMOLATING: the client's tag visual data switches the hand fire spell (221) on and off.
         (GameTag)4238, // REPEATABLE: QuestProgressUI renders repeatable quest arrow.
         (GameTag)4239, // SHATTER: EntityBase.IsShatterable enables Shatter interaction.
         (GameTag)4257, // USES_CHARGES: PlayErrors selects charge-cost error text.
@@ -383,6 +390,12 @@ public sealed class NativeMatch
     private readonly HashSet<int> defeatedEnemyMinions = new HashSet<int>();
     private readonly Dictionary<int, int> rewardControllers = new Dictionary<int, int>();
     private int minimumHealth = 30;
+    private long? rewardPlayStartedAt;
+    private int rewardPlayMilliseconds;
+#if ENGINE_SOURCE
+    private HashSet<int> rewardRewindTurns;
+#endif
+    internal Func<long> RewardClock { get; set; } = () => MonotonicMilliseconds;
     private readonly int seed, startingStars;
     private int planningTurn = -1, decisionIndex;
     private readonly System.Diagnostics.Stopwatch turnClock = new System.Diagnostics.Stopwatch();
@@ -595,8 +608,26 @@ public sealed class NativeMatch
     public LocalRewardFacts RewardFacts => new LocalRewardFacts {
         DistinctCardsPlayed = playedCardIds.Count,
         EnemyMinionsDefeated = defeatedEnemyMinions.Count,
-        MinimumHealth = minimumHealth
+        MinimumHealth = minimumHealth,
+        ActiveTurns = ActiveLossRewardTurns(),
+        PlayMilliseconds = rewardPlayMilliseconds
     };
+
+    private int ActiveLossRewardTurns()
+    {
+#if ENGINE_SOURCE
+        if (Game?.State == State.COMPLETE && Game.Player1.PlayState == PlayState.LOST)
+        {
+            int human = Game.Player1.Id;
+            return Game.HistoryFacts.Query.PlayerActions()
+                .Where(action => action.ControllerId == human && action.ActiveControllerId == human)
+                .Select(action => action.Turn).Union(rewardRewindTurns ?? Enumerable.Empty<int>())
+                .Take(LocalEconomy.FullLossActiveTurns).Count();
+        }
+#endif
+        return 0;
+    }
+
     internal static bool SupportsAchievementEvidence => LocalAchievementCollector.SupportsAuthoritativeFacts;
 
     internal LocalAchievementMatchEvidence AchievementEvidence(LocalAchievementPendingContext pending)
@@ -617,6 +648,9 @@ public sealed class NativeMatch
     internal static Func<LocalProfile> CosmeticsProfile { get; set; }
     // The personal deck whose own card back / hero skin (deck tray cosmetics) override the profile favourites.
     internal long? CosmeticDeckId { get; set; }
+    // Options > Show Plain Cards (NativePlainCardsOption), set before Start and kept for the match: every card of both sides, the
+    // hero included, is sent Normal (PREMIUM and both quality flags 0), engine-authored premium too. Presentation only.
+    internal bool PlainCards { get; set; }
     internal static Func<string, int> NativePetVariant { get; set; }
     private string cosmeticPet;
     private int cosmeticPetVariant, cosmeticPetEntityId;
@@ -792,6 +826,7 @@ public sealed class NativeMatch
         Game = new EngineGame(config);
 #if ENGINE_SOURCE
         Game.RewindBoundaryDiagnostic = message => BotTrace?.Invoke("REWIND_BOUNDARY " + message);
+        Game.CycleBudgetExhaustedDiagnostic = message => BotTrace?.Invoke("CLEANUP_CYCLE_LIMIT " + message + " (the game ends)");
 #endif
         OpponentPlateName = NpcMemoryText.Plate(OpponentName, npcProfile != null ? NpcMemory : null);
 
@@ -829,6 +864,7 @@ public sealed class NativeMatch
             config.Player2HeroCard = ordinaryBotHero; config.Player2HeroClass = ordinaryBotHero.Class;
             Game = new EngineGame(config);
             Game.RewindBoundaryDiagnostic = message => BotTrace?.Invoke("REWIND_BOUNDARY " + message);
+            Game.CycleBudgetExhaustedDiagnostic = message => BotTrace?.Invoke("CLEANUP_CYCLE_LIMIT " + message + " (the game ends)");
             Game.StartGame();
         }
 #endif
@@ -896,12 +932,22 @@ public sealed class NativeMatch
         NoteHumanTimerAction();
         humanOptions = null;
         recorderOptionIndex = index;
+#if ENGINE_SOURCE
+        // A minion or location dropped on a board slot: the client has already put it there (see AnchorPredictedDrop).
+        predictedDrop = task is PlayCardTask { Source: Minion or BoardObject } && pos > 0 ? (WireReturnId(task.Source.Id), pos) : default;
+        try
+        {
+#endif
         try { Process(task); }
         finally { recorderOptionIndex = -1; }
 #if STANDARD_PROOF
         receivedOptions = -1; receivedIndex = -1;
 #endif
         SendHistory(Game.PowerHistory.Last);
+#if ENGINE_SOURCE
+        }
+        finally { predictedDrop = default; }
+#endif
         DriveUntilHumanInput();
     }
 
@@ -963,6 +1009,7 @@ public sealed class NativeMatch
 #if ENGINE_SOURCE
             ApplyDebugScenario();
 #endif
+            rewardPlayStartedAt = RewardClock();
             Game.MainBegin();
 #if ENGINE_SOURCE
             try
@@ -1048,14 +1095,14 @@ public sealed class NativeMatch
     // Presentation-only nameless SETASIDE stand-ins (client id -> engine id) for offers outside SETASIDE or already
     // named on the client: ChoiceCardMgr forces hand actors on every offer and hides the unchosen ones.
     private readonly Dictionary<int, int> opposingProxies = new Dictionary<int, int>();
-    private double opposingShownAt = -1, opposingRevealedAt = -1, opposingHoldStarted = -1;
+    private double opposingShownAt = -1, opposingRevealedAt = -1;
+    private OpposingChoicePacing opposingPacing;
     // EntitiesChosen waiting for the client to process its EntityChoices. GameState processes an EntitiesChosen at once
     // when no choice of that player is mapped; arriving before its EntityChoices it would leave that choice mapped
     // forever and queue every later choice (the human's too) behind it. Each entry also retires its spent picks, and
     // carries a guess's result row (NoteGuessResult), which must not reach the client before its EntitiesChosen.
     private readonly List<(PowerEntityChoices Choices, List<int> Picks, HashSet<int> Proxies, (int Source, int Target)? Guess)> deferredOpposing =
         new List<(PowerEntityChoices Choices, List<int> Picks, HashSet<int> Proxies, (int Source, int Target)? Guess)>();
-    internal const double OpposingDealWaitMilliseconds = 3000;
     // Native ChoiceCardMgr has dealt (revealed) the opposing choice with this id. Null headless: shown counts as dealt.
     internal Func<int, bool> NativeOpposingChoiceRevealed { get; set; }
     // Native GameState has processed the opposing EntityChoices with this id. Null headless: sent counts as processed.
@@ -1098,8 +1145,9 @@ public sealed class NativeMatch
             .Select(id => toClient.TryGetValue(id, out int proxy) ? proxy : id).Where(shown.Entities.Contains).Distinct().ToList();
         var proxies = new HashSet<int>(picks.Where(opposingProxies.ContainsKey));
         NoteGuessResult(shown, shown.Entities, id => opposingProxies.TryGetValue(id, out int engine) ? engine : id, (opposingPicks ?? new List<int>()));
+        LogOpposingHold(true);
         opposingChoices = null; opposingChoiceSource = null; opposingChoiceOriginals = null; opposingPicks = null;
-        opposingProxies.Clear(); opposingShownAt = opposingRevealedAt = opposingHoldStarted = -1;
+        opposingProxies.Clear(); opposingShownAt = opposingRevealedAt = -1; opposingPacing = null;
         // Game over: the native OnGameOver cancels every shown choice itself.
         if (Game.State == State.COMPLETE) { deferredOpposing.Clear(); return (null, null, null); }
         if (deferredOpposing.Count > 0 || !OpposingChoiceReceived(shown.Index))
@@ -1185,7 +1233,7 @@ public sealed class NativeMatch
         SendPowerHistory(proxies);
         opposingChoices = shown; opposingChoiceSource = choice; opposingChoiceOriginals = new List<int>(choice.Choices);
         opposingPicks = null;
-        opposingShownAt = NpcClock(); opposingHoldStarted = -1;
+        opposingShownAt = NpcClock(); opposingPacing = new OpposingChoicePacing();
         opposingRevealedAt = NativeOpposingChoiceRevealed == null ? opposingShownAt : -1;
         send(17, ToNativeChoice(shown));
     }
@@ -1200,28 +1248,60 @@ public sealed class NativeMatch
         if (revealed) opposingRevealedAt = NpcClock();
     }
 
-    // Before the NPC commits a pick: wait (outside the runner's 4 s pacing budget) until the client has dealt this
-    // choice's backs, at most 3 s from the first time the pick is ready. A late deal is still safe: EntitiesChosen waits.
-    internal double OpposingChoiceHold(BotAction action)
-    {
-        if (opposingChoices == null || action == null || action.Type != PlayerTaskType.CHOOSE) return 0;
-        ObserveOpposingChoiceReveal();
-        if (opposingRevealedAt >= 0) return 0;
-        double now = NpcClock();
-        if (opposingHoldStarted < 0) opposingHoldStarted = now;
-        return now - opposingHoldStarted < OpposingDealWaitMilliseconds ? 100 : 0;
-    }
-
-    // A human-plausible look at the dealt backs before the pick (within the pacing budget); thinking time counts.
+    // A human-plausible look at the dealt backs before the pick; thinking time counts.
     internal static double OpposingChoiceBeatMilliseconds(Personality personality) => personality == null ? 1200
         : Math.Min(2500, Math.Max(1200, 1000 * (personality.ActionMinSeconds + personality.ActionMaxSeconds)));
 
-    internal double OpposingChoiceDwell(BotAction action)
+    // Native power queue has nothing running or waiting. Null headless: idle.
+    internal Func<bool> NativeNpcPowerIdle { get; set; }
+    // The choice source's play spell (a minion's, say) has not ended on the client. Null headless: ended.
+    internal Func<int, bool> NativeOpposingSourceSpellActive { get; set; }
+
+    // Before the NPC commits a pick, in milliseconds still to hold (0: go). All of it sits outside the runner's 4 s
+    // artificial-delay budget and every wait is bounded (OpposingChoicePacing): the client has dealt this choice's backs
+    // (3 s of unbroken power-queue idle before giving up), the decision-battlecry source's play spell
+    // has ended (an answer that lands on a running spell restarts it, #238), then the beat. A late deal is still safe:
+    // EntitiesChosen waits for it.
+    internal double OpposingChoiceHold(BotAction action)
     {
-        if (opposingChoices == null || action == null || action.Type != PlayerTaskType.CHOOSE) return 0;
+        if (opposingChoices == null || opposingPacing == null || action == null || action.Type != PlayerTaskType.CHOOSE) return 0;
         ObserveOpposingChoiceReveal();
-        if (opposingRevealedAt < 0) return 0;
-        return Math.Max(0, OpposingChoiceBeatMilliseconds(npcProfile?.Personality) - (NpcClock() - opposingRevealedAt));
+        bool powerIdle;
+        try { powerIdle = NativeNpcPowerIdle?.Invoke() ?? true; } catch (Exception) { powerIdle = true; }
+        var source = OpposingChoiceRecipeSource();
+        bool sourceIsDecisionBattlecry = source?.Card?.Power?.PowerTask is SabberStoneCore.Tasks.SimpleTasks.DecisionBattlecryTask;
+        Func<bool> spell = NativeOpposingSourceSpellActive == null || source == null ? (Func<bool>)null
+            : () => NativeOpposingSourceSpellActive(WireReturnId(source.Id));
+        double hold = opposingPacing.Hold(NpcClock(), opposingRevealedAt, OpposingChoiceBeatMilliseconds(npcProfile?.Personality),
+            powerIdle, sourceIsDecisionBattlecry, spell, NpcTurnDeadlineLeft());
+        if (hold <= 0) LogOpposingHold(false);
+        return hold;
+    }
+
+    private IPlayable OpposingChoiceRecipeSource()
+    {
+        if (Game == null || opposingChoiceSource == null) return null;
+        try
+        {
+            int id = DarkGifts.RecipeSource(Game, opposingChoiceSource.SourceId);
+            return Game.IdEntityDic.TryGetValue(id, out var source) ? source : null;
+        }
+        catch (Exception) { return null; }
+    }
+
+    // One line per opposing choice, when its hold ends: why (deal, spell, cap, deadline, canact) and for how long, so a live
+    // check can tell a release at the spell's end from one at a cap.
+    private void LogOpposingHold(bool abandoned)
+    {
+        var pacing = opposingPacing;
+        if (pacing == null || !pacing.Started || pacing.Logged) return;
+        if (abandoned) pacing.Abandon(NpcClock());
+        if (pacing.Released == null) return;
+        pacing.Logged = true;
+        string card = OpposingChoiceRecipeSource()?.Card?.Id;
+        BotTrace?.Invoke(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            "NPC_CHOICE_HOLD card={0} released={1} waited={2:F2} spellWait={3:F2}",
+            card ?? "?", pacing.Released, pacing.WaitedMilliseconds / 1000, pacing.SpellWaitedMilliseconds / 1000));
     }
 #else
     internal int OpposingChoiceId => -1;
@@ -1683,7 +1763,8 @@ public sealed class NativeMatch
             AnswerDecision(decision.Id, decision.ControllerId, choice.Choices);
             return;
         }
-        if (RewindRules.WouldBegin(Game, task))
+        bool rewindAttempt = RewindRules.WouldBegin(Game, task);
+        if (rewindAttempt)
         {
             var rewindSource = Game.IdEntityDic[SourceId(task)];
             rewindPrivacy = privacyTargets.ToDictionary(pair => pair.Key, pair => new HashSet<int>(pair.Value));
@@ -1753,6 +1834,12 @@ public sealed class NativeMatch
         {
             CopyTransportBridge.Exit();
         }
+#if ENGINE_SOURCE
+        // Rewind can erase the attempt's action fact. Count its committed play block, including a Hero Power.
+        if (rewindAttempt && task.Controller == Game.Player1 && Game.PowerHistory.Last.OfType<PowerHistoryBlockStart>()
+            .Any(block => block.Source == publicSource && NativePetReactions.IsCardPlay(block)))
+            (rewardRewindTurns ??= new HashSet<int>()).Add(publicTurn);
+#endif
         if (task is ConcedeTask)
         {
             humanOptions = null;
@@ -1799,6 +1886,8 @@ public sealed class NativeMatch
 
     private void RecordedAction(string implicitKind = null)
     {
+        if (!resultRecorded && Game.State == State.COMPLETE && Game.Player1.PlayState == PlayState.LOST && rewardPlayStartedAt.HasValue)
+            rewardPlayMilliseconds = (int)Math.Max(0, Math.Min(LocalEconomy.FullLossMilliseconds, RewardClock() - rewardPlayStartedAt.Value));
         publicEventIndex++;
         matchRecorder.PostAction(Game, implicitKind);
         if (Game.State != State.COMPLETE) return;
@@ -1963,6 +2052,12 @@ public sealed class NativeMatch
             var placementSource = matches[0].Source;
             bool eitherSide = SabberStoneCore.Actions.EitherSideRules.Supports(placementSource.Card);
             var placementBoard = eitherSide ? SabberStoneCore.Actions.EitherSideRules.Destination(Game.Player1, wantedChooseOne).BoardZone : Game.Player1.BoardZone;
+            // The client takes the drop slot from the human's own board, also when the sub-option then picks the enemy side,
+            // so it can lie past the end of a smaller enemy board (#194). Keep the slot when it fits, else the enemy board's end.
+            // A slot past the human's own board too is no drop slot at all and stays refused below.
+            if (eitherSide && placementBoard != Game.Player1.BoardZone && wantedPosition > placementBoard.SlotCount
+                && wantedPosition <= Game.Player1.BoardZone.SlotCount)
+                wantedPosition = placementBoard.SlotCount;
             if (eitherSide && !SabberStoneCore.Actions.EitherSideRules.Valid(Game.Player1, placementSource, null, wantedPosition, wantedChooseOne))
                 throw new ArgumentException("Selected board placement is no longer legal.");
             bool locationPlacement = humanPlacementBoardHadLocations || Game.Player1.BoardZone.HasLocations || Game.Player2.BoardZone.HasLocations ||
@@ -2101,6 +2196,9 @@ public sealed class NativeMatch
             + " reuse=0 lethal=forced slice=0 ms=0 nodes=0 timeout=1 action=" + decision.Action);
     }
 
+    private double NpcTurnDeadlineLeft() =>
+        timedTurn == Game.Turn && turnDeadline != long.MaxValue ? turnDeadline - MonotonicMilliseconds : double.PositiveInfinity;
+
     private bool NpcCanAct() => !npcStopped && Game != null && Game.State != State.COMPLETE
         && Game.Turn == npcTurn && Game.Player1.Choice == null
         && (Game.CurrentPlayer == Game.Player2 || Game.Player2.Choice != null);
@@ -2128,16 +2226,11 @@ public sealed class NativeMatch
             () => new GoldenContext(Game.Turn, ++decisionIndex, unchecked(997 * Game.Turn + decisionIndex * 31), npcProfile),
             BeginNpcDecision, NpcFallback, ActNpc, () => NativeNpcIdle?.Invoke() ?? true,
             line => BotTrace?.Invoke(line), matchRecorder, () => publicEventIndex, NpcTurnNodes,
-            action => Math.Max(npcPresentation?.ActedCardDwell(action.Source,
+            action => npcPresentation?.ActedCardDwell(action.Source,
                 new HashSet<int>(Game.Player2.HandZone.Concat(Game.Player2.BoardZone).Select(card => card.Id))) ?? 0,
-#if ENGINE_SOURCE
-                OpposingChoiceDwell(action)),
-#else
-                0),
-#endif
             () => NativeNpcBusyReason?.Invoke(),
             // Nozdormu-style finite turn deadline (monotonic clock), so elite+ never searches into a timed-out turn.
-            () => timedTurn == Game.Turn && turnDeadline != long.MaxValue ? turnDeadline - MonotonicMilliseconds : double.PositiveInfinity,
+            NpcTurnDeadlineLeft,
 #if ENGINE_SOURCE
             OpposingChoiceHold);
 #else
@@ -2201,6 +2294,7 @@ public sealed class NativeMatch
                 // one-ply fallback had no time to look at them (FastFinish.Fallback; other reasons keep the bounded fallback).
                 task = FastFinish.Fallback(view, tasks.Select(BotAction.From).ToArray(), reason,
                     () => npcRunner.SpendFallbackNode(), out fastFinish, out compared).Resolve(tasks);
+                view.ReportAllDiscarded();
             }
             catch (Exception error) when (!(error is OutOfMemoryException)) {
                 BotTrace?.Invoke("fallback-evaluation-fault=" + error.GetType().Name);
@@ -3040,9 +3134,16 @@ public sealed class NativeMatch
                 try { EventTrace?.Invoke(line); } catch (Exception) { }
             }, HumanPlayerId.ToString(), BotPlayerId.ToString());
             // The log follows the transport corrections the client is sent at each history position (an aura's removal).
-            eventLog.Corrections = (entries, index) => copyCompletions
-                .Where(c => ReferenceEquals(c.Entries, entries) && c.HistoryIndex == index)
-                .Select(c => new MatchEventLog.TransportCorrection(c.EntityId, c.Tags, c.RequiresPublicReplay)).ToList();
+            eventLog.IsRevealed = revealedEntities.Contains;
+            eventLog.Corrections = (entries, index) =>
+            {
+                if (copyCompletions.Count == 0) return Array.Empty<MatchEventLog.TransportCorrection>();
+                var found = new List<MatchEventLog.TransportCorrection>();
+                foreach (var c in copyCompletions)
+                    if (c.HistoryIndex == index && ReferenceEquals(c.Entries, entries))
+                        found.Add(new MatchEventLog.TransportCorrection(c.EntityId, c.Tags, c.RequiresPublicReplay));
+                return found;
+            };
         }
         eventBatch.Clear();
         return true;
@@ -3132,9 +3233,46 @@ public sealed class NativeMatch
         int tradeSource = 0;
         bool tradeHidden = false;
 #endif
+#if ENGINE_SOURCE
+        // A quest's completion block (TRIGGER with the QUEST or QUESTLINE keyword) is where the client builds its
+        // quest-complete animation; it needs the reward the quest names, so the opponent's reward is named inside
+        // that block and hidden again at its end.
+        // A suspended block may span sends: reveal only when its hide can travel in this same packet.
+        var closedBlocks = new HashSet<int>();
+        var openBlocks = new Stack<int>();
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i] is PowerHistoryBlockStart) openBlocks.Push(i);
+            else if (entries[i] is PowerHistoryBlockEnd && openBlocks.Count > 0) closedBlocks.Add(openBlocks.Pop());
+        }
+        int blockDepth = 0, questBlockDepth = 0, questSource = 0, questRewardDbfId = 0;
+        var questRewards = new List<int>();
+#endif
         for (int index = 0; index < entries.Count; index++)
         {
 #if ENGINE_SOURCE
+            if (entries[index] is PowerHistoryBlockEnd)
+            {
+                if (questBlockDepth > 0 && blockDepth == questBlockDepth)
+                {
+                    foreach (int reward in questRewards) AppendQuestRewardHide(packet, reward);
+                    questRewards.Clear();
+                    questBlockDepth = 0;
+                }
+                if (blockDepth > 0) blockDepth--;
+            }
+            else if (entries[index] is PowerHistoryBlockStart opened)
+            {
+                blockDepth++;
+                if (questBlockDepth == 0 && closedBlocks.Contains(index) && opened.BlockType == BlockType.TRIGGER
+                    && (opened.TriggerKeyword == (int)GameTag.QUEST || opened.TriggerKeyword == (int)SabberStoneCore.Actions.QuestRules.QuestlineTag))
+                {
+                    questBlockDepth = blockDepth;
+                    questSource = opened.Source;
+                    questRewardDbfId = Game.IdEntityDic.TryGetValue(questSource, out var quest)
+                        ? quest.Card[GameTag.QUEST_REWARD_DATABASE_ID] : 0;
+                }
+            }
             identityPosition = index;
 #endif
             AppendCopyCompletions(packet, entries, index);
@@ -3315,6 +3453,28 @@ public sealed class NativeMatch
 #else
             PowerHistoryData native = ToNativeHistory(entry);
 #endif
+#if ENGINE_SOURCE
+            if (questBlockDepth > 0 && native != null && (native.HasFullEntity || native.HasShowEntity)
+                && (entry is PowerHistoryFullEntity || entry is PowerHistoryShowEntity))
+            {
+                var snapshot = (entry as PowerHistoryFullEntity)?.Entity ?? ((PowerHistoryShowEntity)entry).Entity;
+                var shown = native.HasFullEntity ? native.FullEntity : native.ShowEntity;
+                if (shown.Name.Length == 0 && !string.IsNullOrEmpty(snapshot.Name)
+                    && questRewardDbfId != 0 && LookupCard(snapshot.Name)?.AssetId == questRewardDbfId
+                    && TagValue(snapshot.Tags, GameTag.DISPLAYED_CREATOR) == questSource
+                    && TagValue(snapshot.Tags, GameTag.ZONE) == (int)EngineZone.HAND
+                    && TagValue(snapshot.Tags, GameTag.CONTROLLER) != HumanPlayerId)
+                {
+                    // The quest names its reward on the card, so showing it gives nothing away.
+                    var named = ToNativeHistoryEntity(snapshot, true, currentHealthSnapshot: entry is PowerHistoryFullEntity);
+                    named.Tags.RemoveAll(tag => tag.Name == (int)GameTag.REVEALED);
+                    named.Tags.Add(new NativeTag { Name = (int)GameTag.REVEALED, Value = 1 });
+                    native = entry is PowerHistoryFullEntity ? new PowerHistoryData { FullEntity = named }
+                        : new PowerHistoryData { ShowEntity = named };
+                    if (!questRewards.Contains(snapshot.Id)) questRewards.Add(snapshot.Id);
+                }
+            }
+#endif
             // Keep the pre-PLAY reveal; an identical frozen exit must not reload native identity twice.
             if (IsPublicExitReveal(entries, index))
             {
@@ -3441,6 +3601,7 @@ public sealed class NativeMatch
         AppendHeraldState(packet);
 #endif
 #if ENGINE_SOURCE
+        AppendHeraldDefinitions(packet);
         AppendDecisionHandTarget(packet);
 #endif
 #if ENGINE_SOURCE
@@ -3567,11 +3728,23 @@ public sealed class NativeMatch
             default: return current;
         }
     }
+
+    // Smoldering family only (FIR_911, FIR_914, FIR_916 are the only cards with these definition tags): turnsLeft is their
+    // TAG_SCRIPT_DATA_NUM_2 countdown. A future card with the same tags but another meaning for that counter needs its own rule.
+    private static int? HandBurnTag(EngineCard card, GameTag tag, EngineZone zone, int turnsLeft)
+    {
+        if (((int)tag != 2505 && (int)tag != 2600) || card[(GameTag)2505] != 1
+            || card[(GameTag)4213] != 1 || card[(GameTag)2600] != 3) return null;
+        // Smoldering's script counter owns the timer; CardDef's stage 3 is only its initial value.
+        int stage = zone == EngineZone.HAND ? Math.Max(0, Math.Min(3, turnsLeft)) : 0;
+        return (int)tag == 2505 ? (stage > 0 ? 1 : 0) : stage;
+    }
 #endif
 
     // Owned premium of a deck copy or the starting hero; 0 leaves engine-authored values (e.g. Zola's Golden copy) intact.
     private int EntityPremium(int id, string cardId)
     {
+        if (PlainCards) return 0;
         int premium = SourcePremium(id);
         if (premium != 0) return premium;
         return cosmeticHero != null && id == Game.Player1.Hero.Id && cardId == cosmeticBaseHero
@@ -3696,10 +3869,15 @@ public sealed class NativeMatch
         : tag == 2589 ? (premium == 3 ? 1 : 0)
         : (int?)null;
 
+    private static bool IsPremiumTag(int tag) => tag == (int)GameTag.PREMIUM || tag == 1932 || tag == 2589;
+
+    // What the client gets for a premium tag: 0 with Plain Cards, else the owned override (null keeps the engine value).
+    private int? PresentedPremiumValue(int tag, int premium) => PlainCards && IsPremiumTag(tag) ? 0 : OwnedPremiumValue(tag, premium);
+
     // Live getters below serve endpoint stat refresh/audits, never names or historical privacy decisions.
     private int PresentedTagValue(IPlayable entity, GameTag tag) =>
         tag == GameTag.GHOSTLY && temporaryDiscardVisuals.Contains(entity.Id) && entity.Zone?.Type == EngineZone.GRAVEYARD ? 1
-        : SkinTag(entity.Id, entity.Card.Id, (int)tag) ?? OwnedPremiumValue((int)tag, EntityPremium(entity.Id, entity.Card.Id)) ?? PrintedTagValue(entity, tag);
+        : SkinTag(entity.Id, entity.Card.Id, (int)tag) ?? PresentedPremiumValue((int)tag, EntityPremium(entity.Id, entity.Card.Id)) ?? PrintedTagValue(entity, tag);
 
     private IEnumerable<KeyValuePair<GameTag, int>> PresentedStats(IPlayable entity)
     {
@@ -3711,7 +3889,7 @@ public sealed class NativeMatch
             || visibleTransportTags.TryGetValue(entity.Id, out var playTags) && playTags.ContainsKey((int)GameTag.CANT_PLAY))
             stats = stats.Append(new KeyValuePair<GameTag, int>(GameTag.CANT_PLAY, entity[GameTag.CANT_PLAY]));
 #endif
-        return stats.Select(stat => (SkinTag(entity.Id, entity.Card.Id, (int)stat.Key) ?? OwnedPremiumValue((int)stat.Key, premium)) is int value
+        return stats.Select(stat => (SkinTag(entity.Id, entity.Card.Id, (int)stat.Key) ?? PresentedPremiumValue((int)stat.Key, premium)) is int value
             ? new KeyValuePair<GameTag, int>(stat.Key, value) : stat);
     }
 
@@ -3719,6 +3897,8 @@ public sealed class NativeMatch
     {
         if (tag == GameTag.GHOSTLY) return Math.Max(entity[GameTag.GHOSTLY], entity[TemporaryCardTag]);
 #if ENGINE_SOURCE
+        if (!entity.NativeTags.ContainsKey(tag) && HandBurnTag(entity.Card, tag, entity.Zone?.Type ?? (EngineZone)entity[GameTag.ZONE],
+            entity[GameTag.TAG_SCRIPT_DATA_NUM_2]) is int burn) return burn;
         if (entity.Card.Id == "JAIL_EVENT_100t" && tag == GameTag.MODULAR_ENTITY_PART_1) return 0;
 #endif
         // Elusive is an alias: Silence and targeting auras never write tag 1211.
@@ -3904,8 +4084,11 @@ public sealed class NativeMatch
         yield return new KeyValuePair<GameTag, int>(GameTag.TAG_SCRIPT_DATA_NUM_2, number2);
         yield return new KeyValuePair<GameTag, int>((GameTag)1115, entity.Card[(GameTag)1115]);
         yield return new KeyValuePair<GameTag, int>((GameTag)1116, entity.Card[(GameTag)1116]);
-        yield return new KeyValuePair<GameTag, int>((GameTag)955, AlternateCardText(entity.Card.Id,
-            entity.Zone?.Type ?? (EngineZone)entity[GameTag.ZONE], number, number2, entity[(GameTag)955]));
+        // #192: a tiered card's variant follows its controller's live Herald count (never stored on the entity), so a bounce,
+        // shuffle, side change or Herald is picked up by the endpoint refresh.
+        yield return new KeyValuePair<GameTag, int>((GameTag)955, SabberStoneCore.Actions.HeraldRules.IsTiered(entity.Card)
+            ? SabberStoneCore.Actions.HeraldRules.Variant(entity.Controller)
+            : AlternateCardText(entity.Card.Id, entity.Zone?.Type ?? (EngineZone)entity[GameTag.ZONE], number, number2, entity[(GameTag)955]));
 #endif
         if (entity is Minion minion)
         {
@@ -4007,6 +4190,81 @@ public sealed class NativeMatch
         TrackVisibility(update);
         lastSpellPower[controller.PlayerId] = current;
     }
+
+#if ENGINE_SOURCE
+    // #192: an upgraded Soldier or Herald Colossal appendage keeps its card id and scales its printed stats. The client colours
+    // ATK/HEALTH green when they exceed the entity's definition (Entity.GetDefATK/GetDefHealth), so the definition must carry the
+    // scaled printed stats: DefTags on FULL/SHOW/CHANGE_ENTITY (which reload the definition), else a ChangeDef tag change. A real
+    // buff on top still shows green. The factor is the Soldier's script 2 or the appendage's 31010; Silence resets the stats to printed.
+    internal static int HeraldDefinitionFactor(EngineCard card, IDictionary<GameTag, int> tags)
+    {
+        if (card == null || tags == null || !SabberStoneCore.Actions.HeraldRules.IsTiered(card)
+            || tags.TryGetValue(GameTag.SILENCED, out int silenced) && silenced != 0) return 1;
+        // Soldiers: script 2 (Silence, transform and Reset clear it). Appendages: engine 31010 (Silence resets the stats to printed).
+        var tag = SabberStoneCore.Actions.HeraldRules.IsSoldier(card) ? SabberStoneCore.Actions.HeraldRules.RealizedFactor
+            : SabberStoneCore.Actions.ColossalRules.RealizedFactor;
+        return tags.TryGetValue(tag, out int factor) && factor > 1 ? factor : 1;
+    }
+
+    // The text variant for a snapshot of a tiered card owned by CONTROLLER (player id): its controller's count when it is sent.
+    private int HeraldVariant(int controller) =>
+        Game.Player1.PlayerId == controller ? SabberStoneCore.Actions.HeraldRules.Variant(Game.Player1)
+        : Game.Player2.PlayerId == controller ? SabberStoneCore.Actions.HeraldRules.Variant(Game.Player2) : 0;
+
+    private static List<NativeTag> HeraldDefinitionTags(EngineCard card, int factor) => new List<NativeTag> {
+        new NativeTag { Name = (int)GameTag.ATK, Value = card.ATK * factor },
+        new NativeTag { Name = (int)GameTag.HEALTH, Value = card.Health * factor } };
+
+    // Definition ATK/HEALTH the client holds for each shown tiered entity (the printed ones unless DefTags or ChangeDef said otherwise).
+    private readonly Dictionary<int, (int Atk, int Health)> heraldDefinitions = new Dictionary<int, (int Atk, int Health)>();
+
+    private void AppendHeraldDefinitions(NativePowerHistory packet)
+    {
+        // What this packet already does to the definitions: every FULL/SHOW/CHANGE reloads the card's definition, then applies DefTags.
+        var anchors = new Dictionary<int, int>();
+        for (int i = 0; i < packet.List.Count; i++)
+        {
+            var row = packet.List[i];
+            if (row.HasCreateGame || row.HasResetGame) { heraldDefinitions.Clear(); anchors.Clear(); continue; }
+            if (row.HasHideEntity) { heraldDefinitions.Remove(row.HideEntity.Entity); continue; }
+            var identity = row.HasFullEntity ? row.FullEntity : row.HasShowEntity ? row.ShowEntity : row.HasChangeEntity ? row.ChangeEntity : null;
+            if (identity == null) continue;
+            anchors[identity.Entity] = i + 1;
+            var card = LookupCard(identity.Name);
+            if (card == null || !SabberStoneCore.Actions.HeraldRules.IsTiered(card)) { heraldDefinitions.Remove(identity.Entity); continue; }
+            heraldDefinitions[identity.Entity] = (identity.DefTags.FirstOrDefault(tag => tag.Name == (int)GameTag.ATK)?.Value ?? card.ATK,
+                identity.DefTags.FirstOrDefault(tag => tag.Name == (int)GameTag.HEALTH)?.Value ?? card.Health);
+        }
+        foreach (int id in revealedEntities.OrderBy(value => value).ToArray())
+        {
+            if (!Game.IdEntityDic.TryGetValue(id, out var entity) || !SabberStoneCore.Actions.HeraldRules.IsTiered(entity.Card)
+                || !clientTransportCards.TryGetValue(id, out string shown) || shown != entity.Card.Id || IsHiddenFromHuman(id, null)) continue;
+            int factor = HeraldDefinitionFactor(entity.Card, entity.NativeTags);
+            var wanted = (Atk: entity.Card.ATK * factor, Health: entity.Card.Health * factor);
+            var held = heraldDefinitions.TryGetValue(id, out var known) ? known : (Atk: entity.Card.ATK, Health: entity.Card.Health);
+            if (held == wanted) continue;
+            // After the stat changes that realized (or reset) the scaling, so the entity already holds the value the definition gets.
+            int at = anchors.TryGetValue(id, out int anchor) ? anchor : 0, first = -1;
+            for (int i = at; i < packet.List.Count && first < 0; i++)
+                if (packet.List[i].HasTagChange && packet.List[i].TagChange.Entity == id
+                    && (packet.List[i].TagChange.Tag == (int)GameTag.ATK || packet.List[i].TagChange.Tag == (int)GameTag.HEALTH)) first = i;
+            if (first >= 0)
+            {
+                at = first + 1;
+                while (at < packet.List.Count && packet.List[at].HasTagChange && packet.List[at].TagChange.Entity == id) at++;
+            }
+            else if (!anchors.ContainsKey(id))
+            {
+                at = packet.List.Count;
+                while (at > 0 && packet.List[at - 1].HasPowerEnd) at--;
+            }
+            packet.List.InsertRange(at, new[] { (GameTag.ATK, wanted.Atk), (GameTag.HEALTH, wanted.Health) }.Select(stat =>
+                new PowerHistoryData { TagChange = new PegasusGame.PowerHistoryTagChange {
+                    Entity = id, Tag = (int)stat.Item1, Value = stat.Item2, ChangeDef = true } }));
+            heraldDefinitions[id] = wanted;
+        }
+    }
+#endif
 
 #if ENGINE_SOURCE || MODERN_MECHANICS
     // Pinned HeraldCardTextBuilder reads controller 4534; see tests/transport-invariants/herald-native-evidence.md.
@@ -5107,7 +5365,7 @@ public sealed class NativeMatch
         revealedEntities.Clear(); visibleTransportTags.Clear(); clientTransportTags.Clear(); clientTransportCards.Clear();
         historicalControllers.Clear(); historicalZones.Clear(); historicalPositions.Clear(); historicalTemporaryVisuals.Clear(); temporaryDiscardVisuals.Clear();
         privacyTargets.Clear(); retiredChoiceActors.Clear(); opposingProxies.Clear(); deckChoiceOriginals.Clear(); privateDeckOffers.Clear(); privateChoiceOffers.Clear(); visibleSubSpells.Clear(); visualBlockSources.Clear(); replacedHeroBlockDepths.Clear(); revealedTriggerScopes.Clear(); pendingTriggerReveals.Clear(); lastSpellPower.Clear(); poweredUpHighlights.Clear();
-        opposingChoices = null; opposingChoiceSource = null; opposingChoiceOriginals = null; opposingPicks = null; deferredOpposing.Clear();
+        opposingChoices = null; opposingChoiceSource = null; opposingChoiceOriginals = null; opposingPicks = null; opposingPacing = null; deferredOpposing.Clear();
         decisionHandTargetSource = 0;
         substitutedTargetSource = 0;
         leylineTextEntities.Clear();
@@ -5295,6 +5553,23 @@ public sealed class NativeMatch
         TrackVisibility(update);
     }
 #endif
+
+    private void AppendQuestRewardHide(NativePowerHistory packet, int id)
+    {
+        // Hand-entry effects can retire/combine the reward before the quest block ends.
+        if (!revealedEntities.Contains(id) || !visibleTransportTags.TryGetValue(id, out var tags)
+            || !tags.TryGetValue((int)GameTag.ZONE, out int zone) || zone != (int)EngineZone.HAND
+            || !tags.TryGetValue((int)GameTag.CONTROLLER, out int controller) || controller == HumanPlayerId) return;
+        var hide = ToNativeHistory(new PowerHistoryHideEntity { EntityID = id, Zone = EngineZone.HAND });
+        var clear = new PowerHistoryData { TagChange = new PegasusGame.PowerHistoryTagChange {
+            Entity = id, Tag = (int)GameTag.REVEALED, Value = 0
+        } };
+        foreach (var data in new[] { hide, clear })
+        {
+            packet.List.Add(data);
+            TrackVisibility(data);
+        }
+    }
 
     private void TrackVisibility(PowerHistoryData data)
     {
@@ -5510,12 +5785,11 @@ public sealed class NativeMatch
             ? (int)historicalZone
             : visibleTransportTags.TryGetValue(entityId, out var tags)
                 && tags.TryGetValue((int)GameTag.ZONE, out int visibleZone) ? visibleZone : (int)EngineZone.INVALID;
-        if (zone == (int)EngineZone.PLAY) return true;
         int controller = historicalControllers.TryGetValue(entityId, out int historicalController)
             ? historicalController
             : visibleTransportTags.TryGetValue(entityId, out tags)
                 && tags.TryGetValue((int)GameTag.CONTROLLER, out int visibleController) ? visibleController : 0;
-        return zone == (int)EngineZone.HAND && controller == HumanPlayerId;
+        return ReplayVisibility.IsPublicPlace((EngineZone)zone, controller, HumanPlayerId);
     }
 
     private PowerHistoryData ToNativeHistory(IPowerHistoryEntry entry)
@@ -5533,7 +5807,13 @@ public sealed class NativeMatch
         {
             if (!entityPremiums.ContainsKey(full.Entity.Id) && CarriesPremium(full.Entity, out string createdId))
                 DeriveCreatedPremium(full.Entity.Id, createdId);
-            return new PowerHistoryData { FullEntity = ToNativeHistoryEntity(full.Entity, currentHealthSnapshot: !full.CarriesMaximumHealth()) };
+#if ENGINE_SOURCE
+            bool currentHealth = !full.CarriesMaximumHealth();
+#else
+            // The legacy engine always stores current Health in FULL_ENTITY.
+            const bool currentHealth = true;
+#endif
+            return new PowerHistoryData { FullEntity = ToNativeHistoryEntity(full.Entity, currentHealthSnapshot: currentHealth) };
         }
         if (entry is PowerHistoryShowEntity show)
             return new PowerHistoryData
@@ -5587,6 +5867,8 @@ public sealed class NativeMatch
                 && sent.TryGetValue((int)GameTag.CARDTYPE, out int type) && type == (int)CardType.SPELL)
                 nativeTag = GameTag.CURRENT_SPELLPOWER;
             int value = tag.Value;
+            if ((tag.Tag == SummonSourceTag || tag.Tag == GameTag.CREATOR && IsWireOnlySummonCreator(tag.EntityId, value))
+                && value != 0 && IsHiddenFromHuman(value, null)) value = 0;
             if (tag.Tag == TemporaryCardTag || tag.Tag == GameTag.GHOSTLY)
             {
 #if ENGINE_SOURCE
@@ -5606,7 +5888,7 @@ public sealed class NativeMatch
                 value = Math.Max(value, tag.Tag == TemporaryCardTag ? visual.Ghostly : visual.Temporary);
                 if (temporaryDiscardVisuals.Contains(tag.EntityId)) value = Math.Max(value, 1);
             }
-            if (tag.Tag == GameTag.PREMIUM || (int)tag.Tag == 1932 || (int)tag.Tag == 2589)
+            if (IsPremiumTag((int)tag.Tag))
             {
 #if ENGINE_SOURCE
                 int premium = EntityPremium(tag.EntityId, IdentityAt(identityPosition, tag.EntityId, true, true, definitionOnly: true)?.Name);
@@ -5614,7 +5896,7 @@ public sealed class NativeMatch
                 int premium = EntityPremium(tag.EntityId, Game.IdEntityDic.TryGetValue(tag.EntityId, out var premiumEntity)
                     ? premiumEntity.Card.Id : null);
 #endif
-                value = OwnedPremiumValue((int)tag.Tag, premium) ?? value;
+                value = PresentedPremiumValue((int)tag.Tag, premium) ?? value;
             }
             if (tag.Tag == GameTag.ZONE && IsHiddenFromHuman(tag.EntityId, null))
                 value = HiddenHistoryZone(tag.EntityId, value);
@@ -5677,7 +5959,9 @@ public sealed class NativeMatch
             if (start.TriggerKeyword.HasValue) native.PowerStart.TriggerKeyword = start.TriggerKeyword.Value;
             // A card cast as it is drawn (TOPDECK, 377): PowerProcessor makes its history tile, and its big card when the
             // card is shown in hand, only for a block marked ShowInHistory, as retail marks it.
-            if (start.BlockType == BlockType.TRIGGER && start.TriggerKeyword == 377) native.PowerStart.ShowInHistory = true;
+            // QuestCompleteSpell supplies animation only; PowerProcessor needs this flag for the completion tile.
+            if (start.BlockType == BlockType.TRIGGER && (start.TriggerKeyword == 377
+                || start.TriggerKeyword == (int)GameTag.QUEST || start.TriggerKeyword == (int)SabberStoneCore.Actions.QuestRules.QuestlineTag)) native.PowerStart.ShowInHistory = true;
             // Automatic plays: PowerProcessor creates and holds the big card only when asked (no hand-play reveal).
             if (start is PowerHistoryEffectPlayStart effectPlay && effectPlay.ForceShowBigCard) native.PowerStart.ForceShowBigCard = true;
 #endif
@@ -5891,6 +6175,7 @@ public sealed class NativeMatch
         NormalizeBurnTransitions(packet);
         NormalizeBurnedCards(packet);
         NestPredictedPlayCreations(packet);
+        AnchorPredictedDrop(packet);
         // PowerProcessor.BuildTaskList: END as a packet's last row falls out of its switch, enqueues the list twice and
         // replays the prefab. Blocks stay open across choices, so any recipe can reach this; zero SLUSH_TIME is inert.
         if (packet.List.Count > 0 && packet.List[packet.List.Count - 1].HasSubSpellEnd)
@@ -5994,6 +6279,58 @@ public sealed class NativeMatch
                 list.Insert(runs[run].From, new PowerHistoryData { PowerStart = new PowerHistoryStart {
                     Type = HistoryBlock.Type.TRIGGER, Source = Game.Player1.Id, EffectIndex = -1, SubOption = -1 } });
             }
+        }
+    }
+
+    // Wire id and one-based drop slot of the human's dragged minion or location, while SendOption runs.
+    private (int Source, int Slot) predictedDrop;
+
+    // #194: the client pairs its drop prediction with the PLAY list that moves the card to PLAY only when that list's position for
+    // the card equals the drop slot (ZoneMgr.FindLocalChangeListMatchingServerChangeList takes the card's next position row in the
+    // list, unless another zone change or another card's position comes first). Unpaired, the prediction never resolves:
+    // ZoneMgr.MergeServerChangeList puts the card back at the drop slot after every server list, and the auto-correction that would
+    // move it waits for the prediction. An either-side minion dropped on its own board at slot 4 and sent to the enemy board's
+    // slot 2 stayed on the human's board for good (live check). So when the card's position in that list is not the drop slot,
+    // the list first gives it the drop slot. The engine position follows in the same list, which the client applies to the entity;
+    // once the list is done, ZoneMgr.AutoCorrectZones moves the actor there, as it already does when the enemy slot equals the drop
+    // slot. Every other row stays as it was. The row is added whenever the card's first position row in that list is not the drop
+    // slot: an either-side card placed elsewhere on the enemy board, but also a friendly drop whose list reaches another row first
+    // (a minion that goes Dormant on play: its enchantment's row comes first). The engine's own position row always follows, so
+    // the card still ends at the engine's slot.
+    private void AnchorPredictedDrop(NativePowerHistory packet)
+    {
+        if (predictedDrop.Source == 0) return;
+        var list = packet.List;
+        var (source, slot) = predictedDrop;
+        int start = list.FindIndex(row => row.HasPowerStart && (int)row.PowerStart.Type == (int)BlockType.PLAY && row.PowerStart.Source == source);
+        if (start < 0) return;
+        predictedDrop = default;
+        bool Boundary(PowerHistoryData row) => row.HasPowerStart || row.HasPowerEnd || row.HasSubSpellStart || row.HasSubSpellEnd
+            || row.HasMetaData && (int)row.MetaData.Type == 21;
+        for (int at = start + 1, depth = 0; at < list.Count; at++)
+        {
+            var row = list[at];
+            if (row.HasPowerStart) { depth++; continue; }
+            if (row.HasPowerEnd) { if (depth-- == 0) return; continue; }
+            if (depth > 0 || !row.HasTagChange || row.TagChange.Entity != source || row.TagChange.Tag != (int)GameTag.ZONE
+                || row.TagChange.Value != (int)EngineZone.PLAY) continue;
+            int position = 0;
+            for (int next = at + 1; next < list.Count && !Boundary(list[next]); next++)
+            {
+                var later = list[next];
+                var snapshot = later.HasFullEntity ? later.FullEntity : later.HasShowEntity ? later.ShowEntity : later.HasChangeEntity ? later.ChangeEntity : null;
+                if (later.HasHideEntity || later.HasTagChange && later.TagChange.Tag is (int)GameTag.ZONE or (int)GameTag.CONTROLLER
+                    || snapshot != null && snapshot.Tags.Any(t => t.Name is (int)GameTag.ZONE or (int)GameTag.CONTROLLER)) break;
+                int moved = later.HasTagChange && later.TagChange.Tag == (int)GameTag.ZONE_POSITION ? later.TagChange.Entity
+                    : snapshot != null && snapshot.Tags.Any(t => t.Name == (int)GameTag.ZONE_POSITION) ? snapshot.Entity : 0;
+                if (moved == 0) continue;
+                if (moved == source && later.HasTagChange) position = later.TagChange.Value;
+                break;
+            }
+            if (position != slot)
+                list.Insert(at + 1, new PowerHistoryData { TagChange = new PegasusGame.PowerHistoryTagChange {
+                    Entity = source, Tag = (int)GameTag.ZONE_POSITION, Value = slot } });
+            return;
         }
     }
 #endif
@@ -6165,6 +6502,7 @@ public sealed class NativeMatch
 
     private static bool ReturnEntityTag(int tag) => tag == (int)GameTag.ENTITY_ID
         || tag == (int)GameTag.ATTACHED || tag == (int)GameTag.CREATOR || tag == (int)GameTag.DISPLAYED_CREATOR
+        || tag == (int)SummonSourceTag
         || tag == (int)GameTag.LINKED_ENTITY || tag == (int)GameTag.PARENT_CARD || tag == (int)GameTag.LAST_AFFECTED_BY
         || tag == (int)GameTag.CARD_TARGET || tag == (int)GameTag.WEAPON || tag == (int)GameTag.LAST_CARD_PLAYED
         || tag == (int)GameTag.LAST_CARD_DRAWN || tag == (int)GameTag.HISTORY_PROXY
@@ -6614,6 +6952,15 @@ public sealed class NativeMatch
         return new NativeEntity { Id = entity.Id, Tags = ToNativeTags(entity.Tags) };
     }
 
+    private bool IsWireOnlySummonCreator(int id, int creator, IDictionary<GameTag, int> tags = null)
+    {
+        if (!Game.IdEntityDic.TryGetValue(id, out var entity) || !(entity is Minion) || entity[GameTag.CREATOR] == creator)
+            return false;
+        int zone = tags != null ? TagValue(tags, GameTag.ZONE)
+            : historicalZones.TryGetValue(id, out var historicalZone) ? (int)historicalZone : (int)(entity.Zone?.Type ?? EngineZone.INVALID);
+        return zone == (int)EngineZone.PLAY;
+    }
+
     private PegasusGame.PowerHistoryEntity ToNativeHistoryEntity(EngineHistoryEntity entity, bool revealToHuman = false, bool completeSnapshot = true,
         IReadOnlyDictionary<int, EngineHistoryEntity> resetEntities = null, bool currentHealthSnapshot = false)
     {
@@ -6643,6 +6990,10 @@ public sealed class NativeMatch
                 ? new KeyValuePair<GameTag, int>(pair.Key, entity.Id) : pair);
         var tags = ToNativeTags(hidden && outboundTags != null
             ? outboundTags.Where(pair => IsPublicHiddenTag(pair.Key)) : outboundTags);
+        // Mask hidden sources in 1254 and wire-only summon CREATOR; preserve engine-held CREATOR's legacy pass-through.
+        foreach (var tag in tags.Where(tag => (tag.Name == (int)SummonSourceTag
+            || tag.Name == (int)GameTag.CREATOR && IsWireOnlySummonCreator(entity.Id, tag.Value, entity.Tags)) && tag.Value != 0))
+            if (IsHiddenFromHuman(tag.Value, null, resetEntities)) tag.Value = 0;
         if (!hidden && (!completeSnapshot || temporaryDiscardVisuals.Contains(entity.Id)))
         {
             historicalTemporaryVisuals.TryGetValue(entity.Id, out var visual);
@@ -6704,8 +7055,9 @@ public sealed class NativeMatch
                     ? referenced
                     : SabberStoneCore.Actions.PayloadRules.UsesReferenceTag(raceDefinition) ? 0 : TextValue(GameTag.TAG_SCRIPT_DATA_NUM_1);
             int number2 = raceDefinition.Id == "BE_850t" ? TextValue(GameTag.ATK) : TextValue(GameTag.TAG_SCRIPT_DATA_NUM_2);
-            int alternateText = AlternateCardText(raceDefinition.Id, (EngineZone)TextValue(GameTag.ZONE),
-                number, number2, TextValue((GameTag)955));
+            int alternateText = SabberStoneCore.Actions.HeraldRules.IsTiered(raceDefinition)
+                ? HeraldVariant(TextValue(GameTag.CONTROLLER))
+                : AlternateCardText(raceDefinition.Id, (EngineZone)TextValue(GameTag.ZONE), number, number2, TextValue((GameTag)955));
             bool formattedText = raceDefinition.Text?.Contains("@") == true
                 || System.Text.RegularExpressions.Regex.IsMatch(raceDefinition.Text ?? "", @"\{[0-9]+\}");
             // Entity-reference text (Reference*Entity builders): a stored entity this viewer cannot name is sent as 0.
@@ -6753,6 +7105,9 @@ public sealed class NativeMatch
                 if (tags.Any(tag => tag.Name == (int)printedTag)) continue;
                 if (raceDefinition.Type == CardType.SPELL && printedTag == GameTag.SPELLPOWER) continue;
                 int value = raceDefinition[printedTag];
+#if ENGINE_SOURCE
+                value = HandBurnTag(raceDefinition, printedTag, (EngineZone)TextValue(GameTag.ZONE), number2) ?? value;
+#endif
                 bool printed = value != 0;
                 // Targeting overrides are frozen in the engine snapshot, including Silence's zero.
                 if ((int)printedTag == 1211
@@ -6802,6 +7157,10 @@ public sealed class NativeMatch
                 tags.RemoveAll(tag => tag.Name == premiumTag);
                 tags.Add(new NativeTag { Name = premiumTag, Value = OwnedPremiumValue(premiumTag, premium).Value });
             }
+        // Plain Cards: engine-authored premium (Zola's Golden copy) and printed quality flags read Normal too.
+        if (PlainCards)
+            for (int at = 0; at < tags.Count; at++)
+                if (IsPremiumTag(tags[at].Name) && tags[at].Value != 0) tags[at] = new NativeTag { Name = tags[at].Name, Value = 0 };
         return new PegasusGame.PowerHistoryEntity
         {
             Entity = entity.Id,
@@ -6814,6 +7173,10 @@ public sealed class NativeMatch
                 : changedOffer && !hidden && name.Length > 0
                 ? new[] { GameTag.ATK, GameTag.HEALTH, GameTag.COST }.Select(tag => new NativeTag { Name = (int)tag,
                     Value = tags.FirstOrDefault(shown => shown.Name == (int)tag)?.Value ?? 0 }).ToList()
+#if ENGINE_SOURCE
+                : raceDefinition != null && !hidden && name == raceDefinition.Id && HeraldDefinitionFactor(raceDefinition, entity.Tags) > 1
+                ? HeraldDefinitionTags(raceDefinition, HeraldDefinitionFactor(raceDefinition, entity.Tags))
+#endif
                 : CreationBuilderDefTags(name, hidden, tags),
             Tags = tags.OrderBy(tag => tag.Name).ToList()
         };

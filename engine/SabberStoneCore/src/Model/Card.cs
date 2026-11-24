@@ -11,6 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU Affero General Public License for more details.
 #endregion
+using SabberStoneCore.Identity;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -595,6 +596,15 @@ namespace SabberStoneCore.Model
 		public int AssetId { get; }
 
 		/// <summary>
+		/// A key shared by a card and its reprints (the dbf of the original they all link to; the card's own dbf when it has none).
+		/// Compare this, not <see cref="Id"/> or <see cref="AssetId"/>, in every rule that asks "the same card?" (#225, see <see cref="CardIdentity"/>).
+		/// </summary>
+		public int Identity => CardIdentity.Of(AssetId);
+
+		/// <summary>True when this card and <paramref name="other"/> are one card: the same printing or a reprint of each other.</summary>
+		public bool IsSameCardAs(Card other) => CardIdentity.Same(this, other);
+
+		/// <summary>
 		/// Unique card ID, as defined in
 		/// </summary>
 		public string Id { get; private set; }
@@ -1083,7 +1093,20 @@ namespace SabberStoneCore.Model
         internal void UpdateBoardHistoryDisplays(IPlayable owner)
         {
             if (_boardHistoryDisplays == null || owner is Minion m && m.IsSilenced) return;
-            foreach (var display in _boardHistoryDisplays) owner[display.Tag] = Math.Max(0,display.Value(owner));
+            ApplyHistoryDisplays(owner,_boardHistoryDisplays);
+        }
+
+        // A display is presentation only. In a fair view it may need private residence the viewer lacks
+        // (HistoryFacts throws its "Private historical ..." refusal); that must not abort the simulated action, so the
+        // tag keeps its value. A real (non-projected) game still propagates every exception.
+        private static void ApplyHistoryDisplays(IPlayable owner,HistoryDisplayRecipe[] displays)
+        {
+            var history = owner.Game.HistoryFacts;
+            foreach (var display in displays)
+            {
+                try { owner[display.Tag] = Math.Max(0,display.Value(owner)); }
+                catch (NotSupportedException e) when (history.IsProjected && HistoryFacts.IsPrivateRefusal(e)) { }
+            }
         }
 
 		/// <summary>
@@ -1125,8 +1148,8 @@ namespace SabberStoneCore.Model
 		internal void UpdateHistoryDisplays(IPlayable owner)
 		{
 			if (_historyDisplays == null) return;
-			foreach (var display in _historyDisplays)
-				owner[display.Tag] = Math.Max(0, display.Value(owner));
+			if (owner.Zone?.Type == Zone.HAND && owner.Game.HistoryFacts.ProjectedAwayFrom(owner.Controller.Id)) return;
+			ApplyHistoryDisplays(owner,_historyDisplays);
 		}
 
 		public Card Clone()

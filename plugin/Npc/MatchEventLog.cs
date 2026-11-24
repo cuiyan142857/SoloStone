@@ -49,6 +49,8 @@ internal sealed class MatchEventLog
     // no engine entry of their own, e.g. a minion's stats when an aura on it is removed. The log applies them there as tag
     // changes, so it follows what the client is sent instead of reporting it as drift.
     internal Func<IList<IPowerHistoryEntry>, int, IEnumerable<TransportCorrection>> Corrections;
+    // Whether the transport has revealed an entity to the client before this batch; null counts every entity as revealed.
+    internal Func<int, bool> IsRevealed;
     internal readonly struct TransportCorrection
     {
         internal readonly int EntityId;
@@ -67,9 +69,10 @@ internal sealed class MatchEventLog
         internal int Id, Controller, Zone, Type, Atk, Health, Damage, Armor;
         internal string Card;
         internal bool Fresh, Logged, Script1Known, Guessed;
-        // The tracked stats include an aura's part. An aura's buff reaches the client through its attachment, not as a stat tag
-        // change, so the tracker meets it (and its end) only at the batch-end check.
-        internal bool AuraInStats;
+        // The part of the tracked stats that is an aura's (Attack, max Health). An aura's buff reaches the client through its
+        // attachment, not as a stat tag change, so the tracker meets it (and its end) only at the batch-end check. Every path
+        // that sets the tracked stats sets this too; a stat tag write and the printed-card fallbacks carry none.
+        internal int AuraAtk, AuraHealth;
         internal int Script1;
     }
     // Entities the engine just announced a damage / heal for; the next DAMAGE tag write on them is that hit or heal.
@@ -296,11 +299,21 @@ internal sealed class MatchEventLog
         {
             character.PeekStats(out int atk, out int maxHealth, out int damage);
             ent.Atk = atk; ent.Health = maxHealth; ent.Damage = damage; ent.Armor = character.Armor;
-            ent.AuraInStats = HasAuraStats(character);
+            ent.AuraAtk = character.AuraEffects?.ATK ?? 0; ent.AuraHealth = character.AuraEffects?.Health ?? 0;
         }
     }
 
-    private static bool HasAuraStats(Character character) => (character.AuraEffects?.ATK ?? 0) != 0 || (character.AuraEffects?.Health ?? 0) != 0;
+    // Is the difference between the tracked stats and the live ones exactly an aura's change? Attack moves by the aura's Attack
+    // change, max Health by its Health change, and damage stays, except that losing a Health aura may clamp the current Health.
+    // A partly explained difference is drift.
+    private static bool AuraExplains(Ent ent, Character character, int atk, int maxHealth, int damage)
+    {
+        int dAtk = (character.AuraEffects?.ATK ?? 0) - ent.AuraAtk, dHealth = (character.AuraEffects?.Health ?? 0) - ent.AuraHealth;
+        if (!(character is Hero) && atk - ent.Atk != dAtk) return false;
+        if (maxHealth - ent.Health != dHealth) return false;
+        if (damage == ent.Damage) return true;
+        return dHealth < 0 && maxHealth - damage == Math.Min(ent.Health - ent.Damage, maxHealth);
+    }
 
     // True when the batch still holds a later entry that changes this entity's stats, so the live value is not the value "now".
     // A reveal is not one: OnShow takes no stats from it, and a copied enchantment's own reveal must not hide the copy's real stats.
@@ -337,7 +350,7 @@ internal sealed class MatchEventLog
         string card = string.IsNullOrEmpty(e.Name) && live != null ? live.Card?.Id : e.Name;
         var ent = new Ent { Id = e.Id, Card = card, Controller = Tag(tags, GameTag.CONTROLLER), Zone = Tag(tags, GameTag.ZONE),
             Type = Tag(tags, GameTag.CARDTYPE), Atk = Tag(tags, GameTag.ATK), Health = Tag(tags, GameTag.HEALTH),
-            Damage = Tag(tags, GameTag.DAMAGE), Armor = Tag(tags, GameTag.ARMOR) };
+            Damage = Tag(tags, GameTag.DAMAGE), Armor = Tag(tags, GameTag.ARMOR) };   // tag stats carry no aura part (AuraAtk/AuraHealth 0)
         if (tags.TryGetValue(GameTag.TAG_SCRIPT_DATA_NUM_1, out int script1)) { ent.Script1 = script1; ent.Script1Known = true; }
         ents[e.Id] = ent;
         touched.Add(e.Id);
@@ -436,7 +449,7 @@ internal sealed class MatchEventLog
         // The engine may keep or clear damage and enchantments on a transform (removeEnchantments), and the stream does not say
         // which. When nothing later in this batch touches the entity, the live entity is exactly the state right now.
         if (!ChangedLater(ent.Id) && game.IdEntityDic.TryGetValue(ent.Id, out var live)) TakeLiveStats(ent, live);
-        else if (printed != null) { ent.Atk = Tag(change.Entity.Tags, GameTag.ATK); ent.Health = Tag(change.Entity.Tags, GameTag.HEALTH); ent.Damage = 0;
+        else if (printed != null) { ent.Atk = Tag(change.Entity.Tags, GameTag.ATK); ent.Health = Tag(change.Entity.Tags, GameTag.HEALTH); ent.Damage = 0; ent.AuraAtk = 0; ent.AuraHealth = 0;
             if (ent.Atk == 0 && ent.Health == 0) { ent.Atk = printed.ATK; ent.Health = printed.Health; } }
         string stats = ent.Type == (int)CardType.MINION || ent.Type == (int)CardType.WEAPON
             ? " stats=" + atk0 + "/" + hp0 + "->" + ent.Atk + "/" + (ent.Health - ent.Damage) : "";
@@ -459,15 +472,15 @@ internal sealed class MatchEventLog
         }
     }
 
+    // The client is sent a correction only for an entity that is revealed and sits in a public place at that position
+    // (NativeMatch.IsPublicAtReplay, the same ReplayVisibility rule). The log reads a batch before it is converted, so the
+    // tracker supplies the zone at this position, and an entity this batch already touched counts as revealed (its reveal is in
+    // the batch being converted). The log never feeds the NPC's fair view; this only keeps it consistent with what is sent.
     private bool IsPublicHere(EngineGame game, int id)
     {
-        if (!ents.TryGetValue(id, out var ent))
-        {
-            if (!game.IdEntityDic.TryGetValue(id, out var live)) return false;
-            return live[GameTag.ZONE] == (int)ZoneKind.PLAY
-                || live[GameTag.ZONE] == (int)ZoneKind.HAND && live.Controller?.PlayerId == humanPlayer;
-        }
-        return ent.Zone == (int)ZoneKind.PLAY || ent.Zone == (int)ZoneKind.HAND && ent.Controller == humanPlayer;
+        if (IsRevealed != null && !IsRevealed(id) && !touched.Contains(id)) return false;
+        var ent = Know(game, id);
+        return ReplayVisibility.IsPublicPlace((ZoneKind)ent.Zone, ent.Controller, humanPlayer);
     }
 
     private void OnTag(EngineGame game, PowerHistoryTagChange change, Facts facts)
@@ -550,6 +563,9 @@ internal sealed class MatchEventLog
             case GameTag.ATK:
             case GameTag.HEALTH:
                 {
+                    // A stat tag write leaves the aura part alone: what an emitter writes may include the aura (an enchantment or an
+                    // aura writes entity[Tag], which does) or not (the AttackDamage/BaseHealth setters write the base value), so the
+                    // part is refreshed only from the live entity.
                     if (setup) { if (change.Tag == GameTag.ATK) ent.Atk = change.Value; else ent.Health = change.Value; break; }
                     if (ent.Guessed) { ent.Guessed = false; if (change.Tag == GameTag.ATK) ent.Atk = change.Value; else ent.Health = change.Value; break; }
                     if (pendingStat != ent)
@@ -699,7 +715,7 @@ internal sealed class MatchEventLog
             if (!ChangedLater(ent.Id) && game.IdEntityDic.TryGetValue(ent.Id, out var left)) TakeLiveStats(ent, left);
             else
             {
-                ent.Damage = 0;
+                ent.Damage = 0; ent.AuraAtk = 0; ent.AuraHealth = 0;
                 try { var printed = Cards.FromId(ent.Card); ent.Atk = printed.ATK; ent.Health = printed.Health; } catch (Exception) { }
             }
         }
@@ -709,7 +725,7 @@ internal sealed class MatchEventLog
         {
             if (!ChangedLater(ent.Id) && game.IdEntityDic.TryGetValue(ent.Id, out var entering)) TakeLiveStats(ent, entering);
             else if (ent.Atk == 0 && ent.Health == 0)
-                try { var printed = Cards.FromId(ent.Card); ent.Atk = printed.ATK; ent.Health = printed.Health; } catch (Exception) { }
+                try { ent.AuraAtk = 0; ent.AuraHealth = 0; var printed = Cards.FromId(ent.Card); ent.Atk = printed.ATK; ent.Health = printed.Health; } catch (Exception) { }
             ent.Guessed = false;
         }
         if (setup || inReset) return;
@@ -802,14 +818,14 @@ internal sealed class MatchEventLog
                 if (atkDiffers || ent.Health - ent.Damage != hp)
                 {
                     // An aura's buff, or its end, is a stat change the client was sent (through the aura's attachment): only when
-                    // the live or the tracked stats carry an aura's part. Any other difference is tracker drift.
-                    if (HasAuraStats(character) || ent.AuraInStats)
+                    // the difference is exactly the aura's change. Any other difference, a partly explained one too, is tracker drift.
+                    if (AuraExplains(ent, character, atk, maxHealth, damage))
                         Emit(ent.Controller, "STATS", "target=" + Ref(game, id, card) + " stats=" + ent.Atk + "/" + (ent.Health - ent.Damage) + "->" + atk + "/" + hp + " by=aura");
                     else
                         Emit(ent.Controller, "RESYNC", "target=" + Ref(game, id, card) + " tracked=" + ent.Atk + "/" + (ent.Health - ent.Damage) + " engine=" + atk + "/" + hp);
                     TakeLiveStats(ent, live);
                 }
-                else ent.AuraInStats = HasAuraStats(character);   // the tracked stats are the live ones, with or without an aura
+                else { ent.Health = maxHealth; ent.Damage = damage; ent.AuraAtk = character.AuraEffects?.ATK ?? 0; ent.AuraHealth = character.AuraEffects?.Health ?? 0; }   // current Health and Attack match: take the live max/damage split and aura part
             }
             if (card != null && ent.Card != card) ent.Card = card;
             ent.Type = (int)live.Card.Type;

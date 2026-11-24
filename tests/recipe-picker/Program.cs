@@ -209,4 +209,5 @@ try
 }
 finally { Directory.Delete(root, true); }
 checks += DeckCodeChecks.Run();
+checks += DeckShareChecks.Run();
 Console.WriteLine($"{checks} checks passed");

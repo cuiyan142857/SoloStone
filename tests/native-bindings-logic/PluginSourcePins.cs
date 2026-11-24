@@ -3,9 +3,43 @@ using System.Text.RegularExpressions;
 // Plugin source-text pins: what plugin/*.cs must (or must not) contain. They read source files only, so they need no client.
 internal static class PluginSourcePins
 {
+    // The source a release build (SOLOSTONE_RELEASE defined) compiles: #if !SOLOSTONE_RELEASE blocks (and #if SOLOSTONE_RELEASE
+    // #else branches) dropped; any other condition is kept whole, so the check errs toward finding lab code.
+    internal static string ReleaseSource(string source)
+    {
+        var kept = new List<string>(); var stack = new Stack<(bool known, bool active)>(); bool on = true;
+        foreach (string raw in source.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("#if ", StringComparison.Ordinal))
+            {
+                string condition = line.Substring(4).Trim();
+                bool known = condition == "SOLOSTONE_RELEASE" || condition == "!SOLOSTONE_RELEASE";
+                bool active = !known || condition == "SOLOSTONE_RELEASE";
+                stack.Push((known, on)); on = on && active; continue;
+            }
+            // #elif: its condition is not evaluated; inside a SOLOSTONE_RELEASE test it is kept (errs toward finding lab code).
+            if (line.StartsWith("#elif", StringComparison.Ordinal) && stack.Count > 0)
+            { var top = stack.Peek(); if (top.known) on = top.active; continue; }
+            if (line.StartsWith("#else", StringComparison.Ordinal) && stack.Count > 0)
+            { var top = stack.Peek(); if (top.known) on = top.active && !on; continue; }
+            if (line.StartsWith("#endif", StringComparison.Ordinal) && stack.Count > 0) { on = stack.Pop().active; continue; }
+            if (on) kept.Add(raw.TrimEnd('\r'));
+        }
+        return string.Join("\n", kept);
+    }
     internal static void Run(string root)
     {
         var failures = new List<string>();
+        // Lab test-control helpers (gold-grant, shop-quantity-type, held press) must not exist in a public release build.
+        var releaseText = string.Join("\n", Directory.GetFiles(Path.Combine(root, "plugin"), "*.cs", SearchOption.AllDirectories)
+            .Select(file => ReleaseSource(File.ReadAllText(file))));
+        foreach (string labOnly in new[] { "GrantGoldForTest", "MaximumTestGoldGrant", "TypeQuantityForTest", "HandleCraftingTest",
+            "\"OnInputComplete\"", "HoldUntil", "AmountDiagnostics", "GrantCardTokensForTest", "DoublePress", "DoubleRelease" })
+            if (releaseText.Contains(labOnly)) failures.Add("lab-only test-control code reaches the release build: " + labOnly);
+        if (!ReleaseSource("#if !SOLOSTONE_RELEASE\nA\n#else\nB\n#endif\n#if SOLOSTONE_RELEASE\nC\n#endif\n#if X\nD\n#endif").Equals("B\nC\nD")
+            || !ReleaseSource("#if !SOLOSTONE_RELEASE\nA\n#elif X\nE\n#endif").Equals("E"))
+            failures.Add("release source filter is wrong");
         string achievementToastSource = File.ReadAllText(Path.Combine(root, "plugin/NativeAchievementToast.cs"));
         if (!achievementToastSource.Contains("AchievementToast.prefab:9fa72c338c657d54fb9f63de21c1e4f8")
             || achievementToastSource.Contains("ShowFake("))
@@ -115,5 +149,17 @@ internal static class PluginSourcePins
             if (!hooks.Contains(required, StringComparison.Ordinal)) failures.Add("deck-code hooks lost a review fix: " + required);
         if (plan.Contains("KeepsWildOnlyCards", StringComparison.Ordinal) || !plan.Contains("Cards.FromId(id).Collectible", StringComparison.Ordinal))
             failures.Add("Usable must require collectible cards and carry no Wild switch (the profile ledger decides, PR #136)");
+        // Sharing a deck (#220): the client's own Copy stays (observed by a finalizer that rethrows), and the pasted-text
+        // reader only takes over when the client's own rule would pick a line that is not a code.
+        foreach (string row in new[] {
+            "Hook(harmony, typeof(ShareableDeck), \"ParseDataFromDeckString\", nameof(FindPastedDeckCode))",
+            "Required(typeof(DeckOptionsMenu), \"OnCopyButtonReleased\")", "finalizer: new HarmonyMethod(typeof(NativeUIProbe), nameof(ObserveDeckCopy))" })
+            if (!probe.Contains(row, StringComparison.Ordinal)) failures.Add("deck share hook row missing: " + row);
+        if (!hooks.Contains("if (!rescued) return true;", StringComparison.Ordinal))
+            failures.Add("FindPastedDeckCode must leave text the client reads to the client");
+        if (!hooks.Contains("string code = data == null ? \"\" : found;", StringComparison.Ordinal))
+            failures.Add("the copy observer must keep and log only a deck code, never other clipboard text");
+        foreach (string forbidden in new[] { "systemCopyBuffer =", "CopyToClipboard" })
+            if (hooks.Contains(forbidden, StringComparison.Ordinal)) failures.Add("the share observer must never write the clipboard: " + forbidden);
     }
 }

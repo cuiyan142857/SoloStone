@@ -21,8 +21,8 @@ namespace SabberStoneCore.CardSets.Client.Sets
                 Target = LocationTargetKind.None, RequiresFreeSlot = true,
                 Task = new CustomTask((g, c, s, t, stack) => {
                     if (c.BoardZone.IsFull) return;
-                    var location = (BoardObject)s;
-                    int position = location.Zone == c.BoardZone ? location.ZonePosition + 1 : location.LastBoardPosition;
+                    int alternate = 0;
+                    int position = SummonTask.GetPosition(s, SummonSide.LEFT, 0, ref alternate);
                     int size = c.HandZone.Count;
                     var demon = (Minion)Entity.FromCard(c, Cards.FromId("JAIL_511t"),
                         new EntityData { [GameTag.DISPLAYED_CREATOR] = s.Id });
