@@ -37,7 +37,11 @@ internal static class NativeLanguageOption
         {
             settings = new LanguageSettings(file);
             string root = BepInEx.Paths.GameRootPath;
+#if SOLOSTONE_MACOS
+            installed = GameLanguage.Installed(root, "OSX");
+#else
             installed = GameLanguage.Installed(root);
+#endif
             try { configLocale = GameLanguage.ConfigLocale(File.ReadAllLines(Path.Combine(root, "client.config"))); }
             catch (Exception) { configLocale = null; }
             startLocale = GameLanguage.StartLocale(settings.Locale, configLocale, installed);

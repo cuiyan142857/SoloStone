@@ -13,6 +13,9 @@ static partial class Program
         Check(GameLanguage.Installed(withGerman.Contains).SequenceEqual(new[]{"enUS","deDE"}),"a language with its strings and asset catalog is installed");
         Check(GameLanguage.Installed(new HashSet<string>(enOnly){"Strings/frFR/GLOBAL.txt"}.Contains).SequenceEqual(new[]{"enUS"}),"strings without the asset catalog are not enough");
         Check(GameLanguage.Installed(new HashSet<string>(enOnly){"Data/Win/asset_manifest_frfr.unity3d"}.Contains).SequenceEqual(new[]{"enUS"}),"an asset catalog without strings is not enough");
+        var macChinese=new HashSet<string>{"Strings/zhCN/GLOBAL.txt","Data/OSX/asset_manifest_zhcn.unity3d"};
+        Check(GameLanguage.StartLocale(null,"enUS",GameLanguage.Installed(macChinese.Contains,"OSX"))=="zhCN",
+            "a macOS copy uses its installed Chinese language when English is missing");
         Check(GameLanguage.Installed(path=>throw new IOException("denied")).Count==0,"a file check that throws counts as missing");
         Check(GameLanguage.Locales.All(GameLanguage.Known) && GameLanguage.Locales.Distinct().Count()==14 && GameLanguage.Locales[0]=="enUS","every supported client locale has a name, English first");
         Check(!GameLanguage.Known("enGB") && !GameLanguage.Known("") && !GameLanguage.Known(null) && !GameLanguage.Known("../x"),"enGB (the client maps it to enUS) and junk are not offered");

@@ -52,6 +52,15 @@ internal static class ClientChecks
         reports = reportsFolder; runId = run; log = logger;
         ClientCheckReport.Write(reports, runId, ClientCheckReport.Held, "bindings", null);
         rows = ClientBindings.ReadRows(typeof(ClientChecks).Assembly.GetManifestResourceStream(ClientBindings.Resource));
+#if SOLOSTONE_MACOS
+        // The Steam Deck frame-rate patch is excluded from the macOS build.
+        rows = rows.Except(new[] {
+            "M\tAssembly-CSharp\tGraphicsManager\tUpdateFramerateSettings\t*",
+            "M\tAssembly-CSharp\tUnityTouchScreenService\tGetBatteryMode\t*",
+            "T\tAssembly-CSharp\tPowerSource\t\t",
+            "T\tAssembly-CSharp\tUnityTouchScreenService\t\t"
+        }, StringComparer.Ordinal).ToArray();
+#endif
         var planted = new List<string>();
         ReadPlant(reports, ref planted);
         var missing = ClientBindings.Missing(rows.Concat(planted), RunningClient());

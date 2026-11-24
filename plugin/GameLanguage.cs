@@ -11,8 +11,8 @@ using System.Linq;
 // and is saved in the BepInEx config. Switching in place would need the native reset and download flow, which is mobile-only
 // and online, so a change applies from the next start.
 // A language needs its own files in the copy: Strings/<locale>/ for the game's text and, for every language but enUS (the base
-// catalog), Data/Win/asset_manifest_<locale>.unity3d, the catalog of its localized asset bundles. Card names and text in the
-// card database (Data/Win/dbf.unity3d) already hold every language. Battle.net installs a language's files when it is chosen as
+// catalog), an asset_manifest_<locale>.unity3d under Data/Win or Data/OSX. Card names and text in the
+// card database already hold every language. Battle.net installs a language's files when it is chosen as
 // Hearthstone's text language; the SoloStone copy has the ones that were installed when it was made.
 internal static class GameLanguage
 {
@@ -30,15 +30,15 @@ internal static class GameLanguage
     internal static string Name(string locale) => Known(locale) ? names[locale] : locale;
 
     // Paths relative to the client folder, '/'-separated, that must exist for the client to run in this locale.
-    internal static string[] RequiredFiles(string locale) => locale == Default
+    internal static string[] RequiredFiles(string locale, string assetFolder = "Win") => locale == Default
         ? new[] { "Strings/enUS/GLOBAL.txt" }
-        : new[] { "Strings/" + locale + "/GLOBAL.txt", "Data/Win/asset_manifest_" + locale.ToLowerInvariant() + ".unity3d" };
+        : new[] { "Strings/" + locale + "/GLOBAL.txt", "Data/" + assetFolder + "/asset_manifest_" + locale.ToLowerInvariant() + ".unity3d" };
 
-    internal static List<string> Installed(Func<string, bool> exists) =>
-        Locales.Where(locale => RequiredFiles(locale).All(path => { try { return exists(path); } catch { return false; } })).ToList();
+    internal static List<string> Installed(Func<string, bool> exists, string assetFolder = "Win") =>
+        Locales.Where(locale => RequiredFiles(locale, assetFolder).All(path => { try { return exists(path); } catch { return false; } })).ToList();
 
-    internal static List<string> Installed(string clientRoot) =>
-        Installed(path => File.Exists(Path.Combine(clientRoot, path.Replace('/', Path.DirectorySeparatorChar))));
+    internal static List<string> Installed(string clientRoot, string assetFolder = "Win") =>
+        Installed(path => File.Exists(Path.Combine(clientRoot, path.Replace('/', Path.DirectorySeparatorChar))), assetFolder);
 
     // client.config's [Localization] Locale, as the client reads it (Section.Key, trimmed); null when absent or unreadable.
     internal static string ConfigLocale(IEnumerable<string> lines)
