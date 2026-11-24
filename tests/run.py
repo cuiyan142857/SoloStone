@@ -148,6 +148,7 @@ SUITES = [
     Suite('launcher', 'dotnet', 'the launcher and installer logic (some checks skip without a Hearthstone client)',
           'installer/SoloStone.Launcher.Tests/SoloStone.Launcher.Tests.csproj', artifacts='launcher', release_launcher=True),
     Suite('run-tool', 'python', 'this runner: --client never loses the copy already in references/game', folder='tests/run-tool'),
+    Suite('facts-drift', 'python', 'the card drift file (facts/drift/) is well formed and agrees with the card file', folder='tests/facts-drift'),
     Suite('installer-python', 'python', 'the installer build tools (stage and loader checks; not on Windows)', folder='installer',
           unix_only=True),
 ]
@@ -178,6 +179,8 @@ SUITES += [
           'tests/native-match-logic/NativeMatchLogicTests.csproj'),
     Suite('native-bindings-logic', 'dotnet', 'plugin logic that needs no client: home, strings, status, crafting, matchmaking and rank hooks, and the plugin source-text pins',
           'tests/native-bindings-logic/NativeBindingsLogicTests.csproj'),
+    Suite('test-control', 'dotnet', 'test-control board trace sampling and request validation without a client',
+          'tests/test-control/TestControlTests.csproj', artifacts='test-control'),
     Suite('fx-harmony', 'mono', 'the effect patches applied by the real Harmony library under Mono (the sub-spell pin needs a client)',
           'tests/fx-harmony/FxHarmonyTests.csproj', prebuild_in_tree_with_client=['plugin/OfflineProbe.csproj']),
 ]

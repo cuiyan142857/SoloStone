@@ -1,3 +1,4 @@
+using SabberStoneCore.Identity;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -17,6 +18,8 @@ namespace SabberStoneCore.EffectSystem
     {
         private readonly Game _game;
         private readonly TaskStack _stack;
+        private IPlayable _locationSummonBoundary;
+        private bool _locationSummonBoundaryCaptured;
         public int SourceId { get; }
         public int ControllerId { get; }
         public int? TargetId { get; }
@@ -91,11 +94,27 @@ namespace SabberStoneCore.EffectSystem
 
         public void GiveBuff(int targetId, string enchantmentId, int amount) =>
             Generic.AddEnchantmentBlock(_game, Cards.FromId(enchantmentId), (IPlayable)Source, Target(targetId), amount, amount);
-        public int SummonRightOfLocation(string cardId)
+        // Owner ruling 2026-11-21 from retail video: right of a living location, in its slot on the final charge; creation order in both cases.
+        public int SummonAtLocation(string cardId)
         {
-            var source = (BoardObject)Source;
-            int position = source.Zone == Controller.BoardZone ? source.ZonePosition + 1 : source.LastBoardPosition;
-            return Summon(cardId, Math.Min(position, Controller.BoardZone.SlotCount));
+            return Summon(cardId, LocationSummonPosition());
+        }
+
+        private int LocationSummonPosition()
+        {
+            var location = Source as BoardObject;
+            if (location == null || location.Zone != Controller.BoardZone) {
+                int alternate = 0;
+                return SummonTask.GetPosition(Source, SummonSide.LEFT, 0, ref alternate);
+            }
+            if (!_locationSummonBoundaryCaptured)
+            {
+                int right = location.ZonePosition + 1;
+                _locationSummonBoundary = right < Controller.BoardZone.SlotCount ? Controller.BoardZone.GetSlot(right) : null;
+                _locationSummonBoundaryCaptured = true;
+            }
+            return _locationSummonBoundary?.Zone == Controller.BoardZone
+                ? _locationSummonBoundary.ZonePosition : Controller.BoardZone.SlotCount;
         }
 
         public void AdvanceLocationStage(string nextCardId) => LocationRules.AdvanceStage((BoardObject)Source, nextCardId);
@@ -311,7 +330,16 @@ namespace SabberStoneCore.EffectSystem
 
         /// <summary>Exact ChooseNElements consumption, including rejection draws. Like BuildABeast,
         /// this helper does not introduce a RandomHappened notification.</summary>
-        public T[] SampleDistinct<T>(IReadOnlyList<T> pool, int count) => pool.ChooseNElements(count, _game.Random);
+        public T[] SampleDistinct<T>(IReadOnlyList<T> pool, int count)
+        {
+            // Two printings of one card are one pick (#225). Pools without a reprint pass through unchanged.
+            if (pool is IReadOnlyList<Card> cards && !Cards.RandomPool(_game).Legacy)
+            {
+                Card[] distinct = CardIdentity.Distinct(cards as Card[] ?? cards.ToArray());
+                if (distinct.Length != cards.Count) pool = (IReadOnlyList<T>)(object)distinct;
+            }
+            return pool.ChooseNElements(count, _game.Random);
+        }
 
     }
 }

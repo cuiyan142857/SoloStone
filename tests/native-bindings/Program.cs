@@ -66,15 +66,128 @@ foreach (var contract in new[] {
     ("CollectionManagerDisplay", "OnDeckCreatedFromClipboard", new[] { "Int64", "String" }, "Void"),
     ("CollectionManagerDisplay", "CreateDeckFromClipboard", new[] { "ShareableDeck" }, "Void"),
     ("CollectionInputMgr", "PasteDeckInEditModeFromShareableDeck", new[] { "ShareableDeck" }, "Void"),
-    ("UIStatus", "AddInfo", new[] { "String" }, "Void")
+    ("UIStatus", "AddInfo", new[] { "String" }, "Void"),
+    // Sharing a deck (#220): the client's own Copy, observed, and the pasted-text reader every paste goes through.
+    ("DeckOptionsMenu", "OnCopyButtonReleased", new[] { "UIEvent" }, "Void"),
+    ("ShareableDeck", "ParseDataFromDeckString", new[] { "String", "String&" }, "String"),
+    ("CollectionManager", "GetEditedDeck", Array.Empty<string>(), "CollectionDeck")
 }) MethodSignature(gameMetadata, contract.Item1, contract.Item2, contract.Item3, contract.Item4, signatures);
 Method(gameMetadata, "ShareableDeck", "get_DeckContents");
-Console.WriteLine("PASS deck-code import client members");
+if ((Method(gameMetadata, "ShareableDeck", "ParseDataFromDeckString").Attributes & MethodAttributes.Static) == 0)
+    throw new Exception("ShareableDeck.ParseDataFromDeckString is no longer static (FindPastedDeckCode takes no instance)");
+var copyObserver = Method(pluginMetadata, "NativeUIProbe", "ObserveDeckCopy");
+var copyObserverSignature = copyObserver.DecodeSignature(signatures, (object)null);
+var copyObserverParameters = Parameters(pluginMetadata, copyObserver);
+if (copyObserverSignature.ReturnType != "Void" || copyObserverParameters.Length != 1
+    || pluginMetadata.GetString(copyObserverParameters[0].Name) != "__exception" || copyObserverSignature.ParameterTypes[0] != "Exception")
+    throw new Exception("ObserveDeckCopy: invalid Harmony finalizer signature (void, Exception __exception: observes and rethrows)");
+// DeckCodeText accepts formats 1..4 (FT_WILD..FT_TWIST), as the client's reader checks them against PegasusShared.FormatType.
+using (var pegasusFile = new PEReader(File.OpenRead(Path.Combine(root, "references/game/blizzard.bgsclient.dll"))))
+{
+    var pegasus = pegasusFile.GetMetadataReader();
+    var formats = pegasus.TypeDefinitions.Select(pegasus.GetTypeDefinition)
+        .Single(t => pegasus.GetString(t.Name) == "FormatType" && pegasus.GetString(t.Namespace) == "PegasusShared")
+        .GetFields().Select(pegasus.GetFieldDefinition).Where(f => !f.GetDefaultValue().IsNil)
+        .Select(f => pegasus.GetBlobReader(pegasus.GetConstant(f.GetDefaultValue()).Value).ReadInt32()).ToArray();
+    if (formats.Min() != 0 || formats.Max() != 4 || formats.Length != 5)
+        throw new Exception("PegasusShared.FormatType changed (" + string.Join(",", formats) + "): update DeckCodeText.MaximumFormat");
+}
+Console.WriteLine("PASS deck-code import and share client members");
 MethodSignature(gameMetadata, "Actor", "GetPremium", Array.Empty<string>(), "TAG_PREMIUM", signatures);
 Console.WriteLine("PASS Actor.GetPremium(): TAG_PREMIUM pack reveal contract");
 MethodSignature(gameMetadata, "GameMgr", "ShowTransitionPopup", new[] { "String", "Int32" }, "Void", signatures);
 MethodSignature(gameMetadata, "GameMgr", "LoadTransitionPopup", new[] { "String" }, "Void", signatures);
+// Native Arena transport and boot: method signatures belong to the pinned client, not the offline stand-ins.
+foreach (var contract in new[] {
+    ("CollectionManager", "GetHeroPremium", new[] { "TAG_CLASS" }, "TAG_PREMIUM"),
+    ("Network", "SendArenaSessionRequest", Array.Empty<string>(), "Void"),
+    ("Network", "RequestDraftChoicesAndContents", new[] { "Boolean" }, "Void"),
+    ("Network", "DraftBegin", new[] { "Boolean" }, "Void"),
+    ("Network", "RedraftBegin", new[] { "Boolean" }, "Void"),
+    ("Network", "MakeDraftChoice", new[] { "Int64", "Int32", "Int32", "Int32", "Boolean", "Boolean", "List`1<Int32>" }, "Void"),
+    ("Network", "DraftRetire", new[] { "Int64", "Int32", "Int32", "Boolean" }, "Void"),
+    ("Network", "AckDraftRewards", new[] { "Int64", "Int32", "Boolean" }, "Void"),
+    ("Network", "DraftRequestDisablePremiums", Array.Empty<string>(), "Void"),
+    ("Network", "RequestArenaRatingInfo", Array.Empty<string>(), "Void"),
+    ("Network", "SaveArenaDeck", new[] { "Int64", "List`1<CardUserData>", "Int64", "Int32", "RuneType[]", "Boolean" }, "Void"),
+    ("Network", "GetArenaSessionResponse", Array.Empty<string>(), "ArenaSessionResponse"),
+    ("Network", "GetDraftChoicesAndContents", Array.Empty<string>(), "DraftChoicesAndContents"),
+    ("Network", "GetBeginDraft", Array.Empty<string>(), "BeginDraft"),
+    ("Network", "GetDraftChosen", Array.Empty<string>(), "DraftChosen"),
+    ("Network", "GetRetiredDraft", Array.Empty<string>(), "DraftRetired"),
+    ("Network", "GetRewardsAckDraftID", Array.Empty<string>(), "Int64"),
+    ("Network", "GetDraftRemovePremiumsResponse", Array.Empty<string>(), "DraftChoicesAndContents"),
+    ("Network", "GetArenaRatingInfoResponse", Array.Empty<string>(), "ArenaRatingInfoResponse"),
+    ("Network", "GetSaveArenaDeckResponse", Array.Empty<string>(), "SaveArenaDeckResponse"),
+    ("Network", "GetDraftError", Array.Empty<string>(), "DraftError"),
+    ("Network", "FakeHandleType", new[] { "Int32" }, "Boolean"),
+    ("DraftManager", "OnLoggedIn", Array.Empty<string>(), "Void"),
+    ("DraftManager", "RegisterDisplayHandlers", Array.Empty<string>(), "Void"),
+    ("DraftManager", "OnArenaSessionResponsePacket", new[] { "ArenaSessionResponse" }, "Void"),
+    ("DraftManager", "FindGame", Array.Empty<string>(), "Void"),
+    ("ArenaLandingPageManager", "SpendTicket", Array.Empty<string>(), "Void"),
+    ("ArenaLandingPageManager", "StartMatchmaking", Array.Empty<string>(), "Void"),
+    ("ArenaLandingPageManager", "ShowArenaDisclaimer", Array.Empty<string>(), "Void"),
+    ("ArenaLandingPageManager", "CheckForFTUXPopup", Array.Empty<string>(), "IEnumerator"),
+    ("ArenaLandingPageManager", "UpdateArenaRatingValues", new[] { "Int32", "Int32" }, "Void"),
+    ("GameMgr", "GetPostGameSceneMode", Array.Empty<string>(), "Mode"),
+    ("BnetPresenceMgr", "SetGameFieldBlob", new[] { "UInt32", "IProtoBuf" }, "Boolean"),
+    ("PresenceMgr", "SetStatus", new[] { "Enum[]" }, "Boolean"),
+    ("PresenceMgr", "SetPrevStatus", Array.Empty<string>(), "Boolean")
+}) MethodSignature(gameMetadata, contract.Item1, contract.Item2, contract.Item3, contract.Item4, signatures);
+Console.WriteLine("PASS Arena native message, boot and return contracts");
+// The DRAFT boot watch (plugin/arena/NativeArenaLoad.cs) reads every wait of the scene-loaded coroutines by field name.
+foreach (var (typeName, fieldName, fieldType) in new[] {
+    ("DraftDisplay", "m_confirmButton", "NormalButton"), ("DraftDisplay", "m_heroPower", "Actor"),
+    ("DraftDisplay", "m_currentMode", "DraftMode"), ("DraftDisplay", "m_netCacheReady", "Boolean"),
+    ("DraftDisplay", "m_arenaLandingPageManagerWidget", "Widget"), ("DraftScene", "m_arenaLandingPageWidget", "WidgetTemplate"),
+    ("ArenaLandingPageManager", "m_isNormalWidgetLoaded", "Boolean"), ("ArenaLandingPageManager", "m_isUndergroundWidgetLoaded", "Boolean"),
+    ("ArenaLandingPageManager", "m_isWidgetDoneInitialStateChanging", "Boolean"),
+    ("ArenaLandingPageManager", "m_FTUECoroutine", "Coroutine"), ("ArenaLandingPageManager", "m_tavernTicketDisplay", "TavernTicketDisplay"),
+    ("ArenaLandingPage", "m_playButtonNoActiveRun", "GameObject"), ("ArenaLandingPage", "m_playButtonActiveRun", "GameObject"),
+    ("ArenaLandingPage", "m_getMoreTicketsButtonWidget", "WidgetInstance"), ("TavernTicketDisplay", "m_widget", "Widget"), ("SceneMgr", "m_scene", "PegasusScene") })
+    if (Field(gameMetadata, typeName, fieldName).DecodeSignature(signatures, (object)null) != fieldType)
+        throw new Exception("Arena boot watch field changed: " + typeName + "." + fieldName);
+Console.WriteLine("PASS Arena boot watch reads the pinned client's scene-loaded waits");
+if (!Calls(plugin, pluginMetadata, Method(pluginMetadata, "NativeUIProbe", "Navigate")).Contains(("NativeArena", "NavigationTarget")))
+    throw new Exception("Arena post-reward routing bypasses the shared navigation target");
 var hooks = new[] {
+    ("CollectionDeck", "SendChanges", "NativeArena", "ArenaDeckChanges"),
+    ("CollectionManager", "GetHeroPremium", "NativeArena", "DraftHeroPremium"),
+    ("Network", "SendArenaSessionRequest", "NativeArena", "SessionRequest"),
+    ("Network", "RequestDraftChoicesAndContents", "NativeArena", "ContentsRequest"),
+    ("Network", "DraftBegin", "NativeArena", "BeginRequest"),
+    ("Network", "MakeDraftChoice", "NativeArena", "ChoiceRequest"),
+    ("Network", "DraftRetire", "NativeArena", "RetireRequest"),
+    ("Network", "AckDraftRewards", "NativeArena", "AckRequest"),
+    ("Network", "DraftRequestDisablePremiums", "NativeArena", "PremiumsRequest"),
+    ("Network", "RequestArenaRatingInfo", "NativeArena", "RatingRequest"),
+    ("Network", "SaveArenaDeck", "NativeArena", "SaveRequest"),
+    ("Network", "RedraftBegin", "NativeArena", "RedraftRequest"),
+    ("Network", "GetArenaSessionResponse", "NativeArena", "SessionReply"),
+    ("Network", "GetDraftChoicesAndContents", "NativeArena", "ContentsReply"),
+    ("Network", "GetBeginDraft", "NativeArena", "BeginReply"),
+    ("Network", "GetDraftChosen", "NativeArena", "ChoiceReply"),
+    ("Network", "GetRetiredDraft", "NativeArena", "RetireReply"),
+    ("Network", "GetRewardsAckDraftID", "NativeArena", "AckReply"),
+    ("Network", "GetDraftRemovePremiumsResponse", "NativeArena", "PremiumsReply"),
+    ("Network", "GetArenaRatingInfoResponse", "NativeArena", "RatingReply"),
+    ("Network", "GetSaveArenaDeckResponse", "NativeArena", "SaveReply"),
+    ("Network", "GetDraftError", "NativeArena", "ErrorReply"),
+    ("Box", "OnArenaButtonPressed", "NativeArena", "HomeButton"),
+    ("Hub", "HandleAreanaButtonPressed", "NativeArena", "HomeArena"),
+    ("ArenaLandingPageManager", "Awake", "NativeArena", "BeforeScene"),
+    ("DraftDisplay", "Awake", "NativeArena", "BeforeScene"),
+    ("ArenaLandingPageManager", "SpendTicket", "NativeArena", "Enter"),
+    ("ArenaLandingPageManager", "ToggleUndergroundState", "NativeArena", "Underground"),
+    ("ArenaLandingPageManager", "ShowArenaDisclaimer", "NativeArena", "Disclaimer"),
+    ("ArenaLandingPageManager", "CheckForFTUXPopup", "NativeArena", "NoFtue"),
+    ("ArenaLandingPageManager", "UpdateArenaRatingValues", "NativeArena", "NoRating"),
+    ("ArenaModeToggleButton", "DetermineStartingState", "NativeArena", "ToggleStartingState"),
+    ("DraftManager", "FindGame", "NativeArena", "FindGame"),
+    ("ArenaLandingPageManager", "StartMatchmaking", "NativeArena", "FindGame"),
+    ("DraftDisplay", "PlayButtonPress", "NativeArena", "FindGame"),
+    ("GameMgr", "GetPostGameSceneMode", "NativeArena", "ReturnToDraft"),
     ("GameMenu", "Awake", "NativeReportUI", "AddRow"),
     ("GameMenu", "GetButtons", "NativeReportUI", "ListRow"),
     ("GameMenu", "Show", "NativeReportUI", "PrepareMenu"),
@@ -126,6 +239,7 @@ var hooks = new[] {
     ("CollectionManagerDisplay", "CreateDeckFromClipboard", "NativeUIProbe", "PlanDeckCodeImport"),
     ("CollectionManagerDisplay", "OnDeckCreatedFromClipboard", "NativeUIProbe", "ProjectImportedDeck"),
     ("CollectionInputMgr", "PasteDeckInEditModeFromShareableDeck", "NativeUIProbe", "BlockDeckEditPaste"),
+    ("ShareableDeck", "ParseDataFromDeckString", "NativeUIProbe", "FindPastedDeckCode"),
     ("DeckTrayDeckListContent", "ShouldDeckBoxesBeLocked", "NativeUIProbe", "UnlockLocalDeckBoxSlots"),
     ("CollectionDeckBoxVisual", "SetDeckID", "NativeUIProbe", "LockLoanerBox"),
     ("CollectionDeckBoxVisual", "ShowDeleteButton", "NativeUIProbe", "HideLoanerDeleteButton"),
@@ -355,7 +469,10 @@ using (var unityCore = new PEReader(File.OpenRead(Path.Combine(root, "references
         failures.Add("UnityEngine.Application::set_runInBackground missing (lane background rendering)");
 }
 using (var imguiFile = new PEReader(File.OpenRead(Path.Combine(root, "references/game/UnityEngine.IMGUIModule.dll"))))
+{
     MethodSignature(imguiFile.GetMetadataReader(), "GUIUtility", "set_systemCopyBuffer", new[] { "String" }, "Void", signatures);
+    MethodSignature(imguiFile.GetMetadataReader(), "GUIUtility", "get_systemCopyBuffer", Array.Empty<string>(), "String", signatures);
+}
 foreach (var contract in new[] {
     ("GameMenu", "GameMenuHide", Array.Empty<string>(), "Void"),
     ("ButtonListMenu", "Show", new[] { "Boolean" }, "Void"),
@@ -382,6 +499,9 @@ foreach (string option in new[] { "HAS_SEEN_MULLIGAN", "HAS_SEEN_THE_COIN", "HAS
     foreach (string owner in new[] { "Option", "ServerOptionFlag" })
         if (TryEnumValue(gameMetadata, owner, option) == null)
             failures.Add(owner + "::" + option + " match onboarding flag missing");
+foreach (string option in new[] { "HAS_SEEN_FORGE", "HAS_SEEN_FORGE_REVAMP", "HAS_SEEN_FORGE_REVAMP_UNDERGROUND" })
+    if (TryEnumValue(gameMetadata, "Option", option) == null)
+        failures.Add("Option::" + option + " missing (Arena first-visit slides are suppressed through it)");
 var finalizer = Method(pluginMetadata, "NativeUIProbe", "FinishLocalReorder");
 var finalizerSignature = finalizer.DecodeSignature(signatures, (object)null);
 var finalizerParameters = Parameters(pluginMetadata, finalizer);
@@ -1359,6 +1479,38 @@ catch (Exception error) { failures.Add("ChoiceCardMgr.ChoiceState opposing revea
         || (loanerPath.ImplAttributes & System.Reflection.MethodImplAttributes.NoInlining) == 0
         || !StaticOwners(plugin, pluginMetadata, loanerPath).Contains("NativeUIProjection"))
         failures.Add("OfflineProbe.ConfigureLoanerGroupPath no longer isolates the card catalog initialization");
+}
+// #146: the start-of-turn banner hold (NativeTurnBannerHold) postfixes GameState.CanProcessPowerQueue and reads the turn-start banner state.
+foreach (var contract in new[] {
+    ("GameState", "CanProcessPowerQueue", Array.Empty<string>(), "Boolean"),
+    ("GameState", "IsGameOverNowOrPending", Array.Empty<string>(), "Boolean"),
+    ("GameState", "WasRestartRequested", Array.Empty<string>(), "Boolean"),
+    ("GameState", "IsLocalSidePlayerTurn", Array.Empty<string>(), "Boolean"),
+    ("GameState", "GetPowerProcessor", Array.Empty<string>(), "PowerProcessor"),
+    ("PowerProcessor", "GetPowerQueue", Array.Empty<string>(), "PowerQueue"),
+    ("PowerTaskList", "GetBlockStart", Array.Empty<string>(), "HistBlockStart"),
+    ("PowerTaskList", "IsStartOfBlock", Array.Empty<string>(), "Boolean"),
+    ("PowerTaskList", "GetSourceEntity", new[] { "Boolean" }, "Entity"),
+    ("EntityBase", "IsSecret", Array.Empty<string>(), "Boolean"),
+    ("TurnStartManager", "Get", Array.Empty<string>(), "TurnStartManager"),
+    ("TurnStartManager", "IsListeningForTurnEvents", Array.Empty<string>(), "Boolean"),
+    ("TurnStartManager", "NotifyOfTriggerVisual", Array.Empty<string>(), "Void"),
+    ("TurnStartManager", "IsTurnStartIndicatorShowing", Array.Empty<string>(), "Boolean"),
+    ("HistBlockStart", "get_TriggerKeyword", Array.Empty<string>(), "Int32"),
+    ("HistBlockStart", "get_BlockType", Array.Empty<string>(), "Type")
+}) try { MethodSignature(gameMetadata, contract.Item1, contract.Item2, contract.Item3, contract.Item4, signatures); }
+    catch (Exception) { failures.Add("turn banner hold: client contract changed: " + contract.Item1 + "." + contract.Item2); }
+{
+    var holdPatch = Method(pluginMetadata, "NativeTurnBannerHold", "AfterCanProcessPowerQueue");
+    var holdSignature = holdPatch.DecodeSignature(signatures, (object)null);
+    var holdParameters = Parameters(pluginMetadata, holdPatch);
+    if (holdSignature.ReturnType != "Void" || holdParameters.Length != 2
+        || pluginMetadata.GetString(holdParameters[0].Name) != "__instance" || holdSignature.ParameterTypes[0] != "GameState"
+        || pluginMetadata.GetString(holdParameters[1].Name) != "__result" || holdSignature.ParameterTypes[1] != "Boolean&")
+        failures.Add("NativeTurnBannerHold.AfterCanProcessPowerQueue: invalid Harmony postfix signature");
+    if (!File.ReadAllText(Path.Combine(root, "plugin/NativeTurnBannerHold.cs")).Contains("postfix: new HarmonyMethod(typeof(NativeTurnBannerHold)")
+        || !File.ReadAllText(Path.Combine(root, "plugin/ClientBridge.cs")).Contains("NativeTurnBannerHold.Initialize(harmony, logger)"))
+        failures.Add("NativeTurnBannerHold is not registered");
 }
 PackHookIlChecks.Run(root, (ok, message) => { if (!ok) failures.Add(message); });
 if (failures.Count != 0) throw new Exception(string.Join("\n", failures));

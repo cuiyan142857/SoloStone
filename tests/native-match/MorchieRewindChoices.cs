@@ -63,10 +63,11 @@ internal static partial class Program
         game.DeathProcessingAndAuraUpdate();
         InvokeProcess(match, SabberStoneCore.Tasks.PlayerTasks.HeroPowerTask.Any(player));
         FlushFieldHistory(match);
-        Check(game.Rewind != null && traces.Any(s => s.StartsWith("REWIND_BOUNDARY Settling") && s.Contains("summoned=3")),
-            "#159 native log identifies overdue deathrattle summons and hero power offers Rewind");
+        // #207: the Egg Deathrattle summons resolve in their own cleanup, so nothing is left to settle at the boundary.
+        Check(game.Rewind != null && game.SummonedMinions.Count == 0 && !traces.Any(s => s.StartsWith("REWIND_BOUNDARY")),
+            "#159 Deathrattle summons leave no boundary settlement and hero power offers Rewind: " + string.Join("|", traces.Where(s => s.StartsWith("REWIND_BOUNDARY"))));
         match.StopNpc();
-        Console.WriteLine("PASS #159 native boundary diagnostics: three Egg summons, live trace, Bronze Rewind offer");
+        Console.WriteLine("PASS #159 native boundary: three Egg summons resolved in their cleanup, no settlement, Bronze Rewind offer");
     }
 
     private static void RewindSettlementNoOp(string only = null)

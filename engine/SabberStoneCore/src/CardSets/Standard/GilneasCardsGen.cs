@@ -2398,7 +2398,7 @@ namespace SabberStoneCore.CardSets.Standard
 					new CountTask(EntityType.OP_HAND),
 					new AddEnchantmentTask("GIL_623e", EntityType.SOURCE, true),
 					// Health lost to 0 or less destroys it (a doubled Battlecry can exceed 12), as for Dread Leviathan.
-					new CustomTask((g, c, s, t, stack) => { if (s is Minion m && m.Zone?.Type == Zone.PLAY && m.Health <= 0) m.ToBeDestroyed = true; }))
+					new CustomTask((g, c, s, t, stack) => { if (s is Minion m && m.Zone?.Type == Zone.PLAY) SabberStoneCore.Actions.HealthLossRules.MarkIfDepleted(m); }))
 			}));
 
 			// --------------------------------------- MINION - NEUTRAL

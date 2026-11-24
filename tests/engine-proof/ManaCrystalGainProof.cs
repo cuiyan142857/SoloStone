@@ -150,7 +150,8 @@ internal static class ManaCrystalGainProof
     }
     private static void AstralCommunionOnRaisedCap()
     {
-        var (g, p) = Start(12, 3, cap: 15);
+        int cost = Cards.FromId("AT_043").Cost;
+        var (g, p) = Start(12, 7 - cost, cap: 15); // Seven Mana is spent after paying for the spell.
         Play(g, p, "AT_043");
         Verify(p.BaseMana == 15 && p.RemainingMana == 15, "Astral Communion (Gain 10) from 12 under cap 15 never lowers max, got " + State(p));
     }

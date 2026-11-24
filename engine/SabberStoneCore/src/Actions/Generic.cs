@@ -143,7 +143,8 @@ namespace SabberStoneCore.Actions
 				using var visual = c.Game.History && entryKind != HistoryHandEntryKind.Other
 					? c.Game.PowerHistory.Visual(c.Game, entryKind == HistoryHandEntryKind.Draw
 						? Presentation.VisualPhase.Draw : Presentation.VisualPhase.Create, target: playable) : null;
-				// Retail ordinary draws SHOW HAND; automatic draws SHOW DECK before HAND and the TOPDECK trigger.
+				// Retail ordinary draws SHOW HAND; automatic draws SHOW DECK before HAND and the TOPDECK trigger. A when-drawn
+				// card that then leaves the hand gets REVEALED on this SHOW from CompleteDraw (PowerHistory.RevealDrawShow).
 				if (c.Game.History && playable != null)
 				{
 					var show = PowerHistoryBuilder.ShowEntity(playable);
@@ -257,7 +258,48 @@ namespace SabberStoneCore.Actions
 				return success ? card : null;
 			};
 
-		public static bool ShuffleIntoDeck(Controller c, IEntity sender, IPlayable playable, bool revealGenerated = false)
+		/// <summary>
+		/// Shuffles a minion that was just taken out of play (removed from its board, Reset, controller already set) into
+		/// <paramref name="c"/>'s deck, with retail's rows: ZONE_POSITION=0, HIDE_ENTITY zone=DECK, then ZONE=DECK, all in the
+		/// block of the effect that does it (Psychic Scream, Entomb, Recycle traces). The client hides the card before it
+		/// flies it into the deck; ZONE first lets the flight start on a revealed entity (King Llane jerked and vanished).
+		/// Returns false, sending nothing, when the deck is full.
+		/// </summary>
+		public static bool ShuffleFromBoardIntoDeck(Controller c, IEntity sender, IPlayable minion)
+		{
+			if (c.DeckZone.IsFull) return false;
+			if (c.Game.History)
+			{
+				// Reset() has already zeroed the engine's tag without a row; the client still holds the board slot.
+				minion[GameTag.ZONE_POSITION] = 0;
+				c.Game.PowerHistory.Add(PowerHistoryBuilder.TagChange(minion.Id, GameTag.ZONE_POSITION, 0));
+				c.Game.PowerHistory.Add(PowerHistoryBuilder.HideEntity(minion.Id, Zone.DECK));
+			}
+			return ShuffleIntoDeck(c, sender, minion, alreadyHidden: true);
+		}
+
+		/// <summary>
+		/// Takes a minion out of the game for good (Escape Artist): off its board, Reset, ZONE_POSITION=0, HIDE_ENTITY, then
+		/// ZONE=REMOVEDFROMGAME, in the block of the effect that does it. The client has no zone for it and hides it at
+		/// once. The engine keeps it in its setaside zone, where nothing can return it.
+		/// </summary>
+		public static void RemoveMinionFromGame(Minion minion)
+		{
+			var owner = minion.Controller;
+			owner.BoardZone.Remove(minion);
+			minion.Reset();
+			if (owner.Game.History)
+			{
+				// Reset() has already zeroed the engine's tag without a row; the client still holds the board slot.
+				minion[GameTag.ZONE_POSITION] = 0;
+				owner.Game.PowerHistory.Add(PowerHistoryBuilder.TagChange(minion.Id, GameTag.ZONE_POSITION, 0));
+				owner.Game.PowerHistory.Add(PowerHistoryBuilder.HideEntity(minion.Id, Zone.REMOVEDFROMGAME));
+			}
+			owner.SetasideZone.AddWithoutZoneTag(minion);
+			minion[GameTag.ZONE] = (int)Zone.REMOVEDFROMGAME;
+		}
+
+		public static bool ShuffleIntoDeck(Controller c, IEntity sender, IPlayable playable, bool revealGenerated = false, bool alreadyHidden = false)
 			{
 				using var operation = c.Game.Facts.EnsureShuffle(sender?.Controller.Id ?? 0);
 				if (c.DeckZone.IsFull)
@@ -287,11 +329,23 @@ namespace SabberStoneCore.Actions
 				}
 
 				// add hide entity 
-				if (c.Game.History && !presented)
+				if (c.Game.History && !presented && !alreadyHidden)
 					c.Game.PowerHistory.Add(PowerHistoryBuilder.HideEntity(playable));
 
 				return true;
 			}
+
+		/// <summary>
+		/// Puts a freshly created card at a fixed deck position (0 is the bottom) with the same spawn-to-deck presentation a
+		/// shuffle gets. Not a shuffle: no RNG, no shuffle fact and no shuffle-into-deck listeners.
+		/// </summary>
+		public static bool InsertIntoDeck(Controller c, IPlayable playable, int position, bool reveal = false)
+		{
+			if (c.DeckZone.IsFull) return false;
+			c.DeckZone.Add(playable, position);
+			if (c.Game.History) c.Game.PowerHistory.GeneratedShuffle(playable, reveal);
+			return true;
+		}
 
 		public static Func<Controller, Card, Minion, bool> TransformBlock
 			=> delegate (Controller c, Card card, Minion oldMinion)

@@ -39,6 +39,19 @@ public static class BoardActorInvariant
             .Select(pair => (pair.Key, pair.Value.CardId, pair.Value.CardZone, pair.Value.CardController)).ToList();
     }
 
+    // A card the human drags from the hand and drops at a one-based slot of the board of `side`: the client's view after `play`,
+    // the history the drop produced. Resolved is false while the drop prediction is still waiting for its PLAY list (#194).
+    public static (bool Resolved, int Zone, int Controller, int[] Board1, int[] Board2) DroppedCard(
+        IEnumerable<PowerHistory> before, int id, int slot, int side, IEnumerable<PowerHistory> play)
+    {
+        var client = new ClientModel();
+        foreach (var history in before) client.Apply(history);
+        client.PredictLocalPlay(id, slot, side);
+        foreach (var history in play) client.Apply(history);
+        var card = client.Entities[id];
+        return (!client.HasUnresolvedLocalChange, card.CardZone, card.CardController, client.BoardOrder(1), client.BoardOrder(2));
+    }
+
     internal static IEnumerable<string> Inspect(ClientModel client) => InspectBoard(client).Concat(client.MillFaults);
 
     private static IEnumerable<string> InspectBoard(ClientModel client)

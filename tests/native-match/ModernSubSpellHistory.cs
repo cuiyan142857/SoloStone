@@ -229,9 +229,10 @@ internal static partial class Program
                 if (entry.HasPowerEnd) nested--;
             }
             var damage = damageList.ToArray();
-            bool hidden = drawn && bot;
-            Check(damage.Length > 0 && shots.Length == (hidden || FireQuarantined(id) ? 0 : damage.Length), $"{id} bot={bot} damage={damage.Length} shots={shots.Length}: only public cues");
-            if (!hidden && !FireQuarantined(id)) Check(shots.All(s => s.SourceEntityId == owner.Hero.Id) && shots.Select(s => s.TargetEntityIds.Single()).SequenceEqual(damage), id + " preserves delayed targets");
+            // #195: a Casts When Drawn source is drawn face up for both seats (REVEALED draw SHOW, as in retail), so the
+            // opponent's delayed cue is public too.
+            Check(damage.Length > 0 && shots.Length == (FireQuarantined(id) ? 0 : damage.Length), $"{id} bot={bot} damage={damage.Length} shots={shots.Length}: only public cues");
+            if (!FireQuarantined(id)) Check(shots.All(s => s.SourceEntityId == owner.Hero.Id) && shots.Select(s => s.TargetEntityIds.Single()).SequenceEqual(damage), id + " preserves delayed targets");
             if (id is "FIR_902" or "END_024")
             {
                 // The delayed missile (Fel for the Sigil, Fire for the Secret), one per hit, from the owner's public hero, in the actual Sigil/Secret trigger block.
